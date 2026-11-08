@@ -7,10 +7,10 @@ use std::fmt::{self as StdFmt, Debug, Formatter};
 
 use seize::LocalGuard;
 
-use crate::{MassTreeGeneric, TreeAllocator, policy::LeafPolicy, tree::RemoveError};
+use crate::{MassTreeGeneric, TreeAllocator, ValueRef, policy::LeafPolicy, tree::RemoveError};
 
 /// Result type for [`OccupiedEntry::try_remove_entry`].
-pub type RemoveEntryResult<O> = Result<Option<(Vec<u8>, O)>, RemoveError>;
+pub type RemoveEntryResult<'g, V> = Result<Option<(Vec<u8>, ValueRef<'g, V>)>, RemoveError>;
 
 /// A view into a single entry in a tree, which may either be vacant or occupied.
 ///
@@ -64,8 +64,8 @@ where
     /// The key (borrowed from caller, zero allocation).
     key: &'e [u8],
 
-    /// The current value (snapshot at entry creation time).
-    value: P::Output,
+    /// The current value (guard-scoped snapshot at entry creation time).
+    value: ValueRef<'e, P::Value>,
 
     /// Reference to the tree for insertion.
     tree: &'t MassTreeGeneric<P, A>,
@@ -123,7 +123,7 @@ where
     /// ```
     /// Returns the entry's value if occupied, or inserts the default and returns it.
     #[inline(always)]
-    pub fn or_insert(self, default: P::Value) -> P::Output {
+    pub fn or_insert(self, default: P::Value) -> ValueRef<'e, P::Value> {
         match self {
             Entry::Occupied(o) => o.into_value(),
             Entry::Vacant(v) => v.insert(default),
@@ -132,7 +132,7 @@ where
 
     /// Returns the entry's value if occupied, or computes and inserts a default.
     #[inline(always)]
-    pub fn or_insert_with<F>(self, default: F) -> P::Output
+    pub fn or_insert_with<F>(self, default: F) -> ValueRef<'e, P::Value>
     where
         F: FnOnce() -> P::Value,
     {
@@ -144,7 +144,7 @@ where
 
     /// Returns the entry's value if occupied, or computes a default from the key.
     #[inline(always)]
-    pub fn or_insert_with_key<F>(self, default: F) -> P::Output
+    pub fn or_insert_with_key<F>(self, default: F) -> ValueRef<'e, P::Value>
     where
         F: FnOnce(&[u8]) -> P::Value,
     {
@@ -158,7 +158,7 @@ where
     }
 
     /// Inserts the default value if vacant, returns the entry's value.
-    pub fn or_default(self) -> P::Output
+    pub fn or_default(self) -> ValueRef<'e, P::Value>
     where
         P::Value: Default,
     {
@@ -173,16 +173,23 @@ where
     #[must_use]
     pub fn and_modify<F>(self, f: F) -> Self
     where
-        F: FnOnce(&P::Output) -> P::Value,
+        F: FnOnce(&P::Value) -> P::Value,
     {
         match self {
             Entry::Occupied(mut o) => {
                 let new_value: P::Value = f(&o.value);
                 let new_output: P::Output = P::into_output(new_value);
-                let return_output: P::Output = new_output.clone();
 
-                let _old = o.tree.insert_output_with_guard(o.key, new_output, o.guard);
-                o.value = return_output;
+                // SAFETY: `new_output` is the allocation being published into
+                // the tree; `o.guard` keeps it alive. OCC validation happens
+                // inside the insert path.
+                let new_ref: ValueRef<'e, P::Value> = unsafe {
+                    P::output_to_value_ref(&new_output)
+                };
+                let _old = o
+                    .tree
+                    .insert_output_with_guard(o.key, new_output, o.guard);
+                o.value = new_ref;
 
                 Entry::Occupied(o)
             }
@@ -207,12 +214,17 @@ where
 
                 // Convert to output before insert
                 let output: P::Output = P::into_output(value);
-                let return_output: P::Output = output.clone();
+
+                // SAFETY: `output` is the allocation being published into the
+                // tree; `guard` keeps it alive.
+                let value_ref: ValueRef<'e, P::Value> = unsafe {
+                    P::output_to_value_ref(&output)
+                };
                 let _old = tree.insert_output_with_guard(key, output, guard);
 
                 OccupiedEntry {
                     key,
-                    value: return_output,
+                    value: value_ref,
                     tree,
                     guard,
                 }
@@ -223,7 +235,7 @@ where
     /// Returns a reference to the value if occupied, or `None` if vacant.
     #[must_use]
     #[inline(always)]
-    pub const fn get(&self) -> Option<&P::Output> {
+    pub fn get(&self) -> Option<&P::Value> {
         match self {
             Entry::Occupied(o) => Some(o.get()),
 
@@ -236,7 +248,7 @@ where
 //  OccupiedEntry Implementation
 // ============================================================================
 
-impl<P, A> OccupiedEntry<'_, '_, P, A>
+impl<'e, P, A> OccupiedEntry<'_, 'e, P, A>
 where
     P: LeafPolicy,
     A: TreeAllocator<P>,
@@ -250,27 +262,35 @@ where
 
     /// Gets a reference to the value in the entry.
     #[inline(always)]
-    pub const fn get(&self) -> &P::Output {
+    pub fn get(&self) -> &P::Value {
         &self.value
     }
 
     /// Converts the [`OccupiedEntry`] into the value
     #[inline(always)]
-    pub fn into_value(self) -> P::Output {
+    pub fn into_value(self) -> ValueRef<'e, P::Value> {
         self.value
     }
 
     /// Sets the value of the entry, and returns the old value.
     #[inline(always)]
-    pub fn insert(&mut self, value: P::Value) -> Option<P::Output> {
+    pub fn insert(&mut self, value: P::Value) -> Option<ValueRef<'e, P::Value>> {
         let output = P::into_output(value);
+
+        // SAFETY: `output` is the allocation being published into the tree;
+        // `self.guard` keeps it alive.
+        let new_ref: ValueRef<'e, P::Value> = unsafe { P::output_to_value_ref(&output) };
         let old = self
             .tree
-            .insert_output_with_guard(self.key, output.clone(), self.guard);
+            .insert_output_with_guard(self.key, output, self.guard);
 
-        self.value = output;
+        self.value = new_ref;
 
-        old
+        old.map(|old_output| {
+            // SAFETY: `old_output` was retired by the insert above but cannot
+            // be reclaimed while `self.guard` is held.
+            unsafe { P::output_to_value_ref(&old_output) }
+        })
     }
 
     /// Removes the entry from the tree and returns the actually removed value.
@@ -284,7 +304,7 @@ where
         clippy::panic,
         reason = "Convenience wrapper; use try_remove for fallible version"
     )]
-    pub fn remove(self) -> Option<P::Output> {
+    pub fn remove(self) -> Option<ValueRef<'e, P::Value>> {
         match self.try_remove() {
             Ok(value) => value,
 
@@ -298,7 +318,7 @@ where
     ///
     /// Returns error if removal failed
     #[inline(always)]
-    pub fn try_remove(self) -> Result<Option<P::Output>, RemoveError> {
+    pub fn try_remove(self) -> Result<Option<ValueRef<'e, P::Value>>, RemoveError> {
         self.tree.remove_with_guard(self.key, self.guard)
     }
 
@@ -313,7 +333,7 @@ where
         clippy::panic,
         reason = "Convenience wrapper; use try_remove_entry for fallible version"
     )]
-    pub fn remove_entry(self) -> Option<(Vec<u8>, P::Output)> {
+    pub fn remove_entry(self) -> Option<(Vec<u8>, ValueRef<'e, P::Value>)> {
         match self.try_remove_entry() {
             Ok(result) => result,
 
@@ -327,7 +347,7 @@ where
     ///
     /// Returns an error if the underlying tree operation encounters a failure.
     #[inline(always)]
-    pub fn try_remove_entry(self) -> RemoveEntryResult<P::Output> {
+    pub fn try_remove_entry(self) -> RemoveEntryResult<'e, P::Value> {
         let key_owned: Vec<u8> = self.key.to_vec();
 
         match self.tree.remove_with_guard(self.key, self.guard)? {
@@ -341,7 +361,7 @@ where
 //  VacantEntry Implementation
 // ============================================================================
 
-impl<P, A> VacantEntry<'_, '_, P, A>
+impl<'e, P, A> VacantEntry<'_, 'e, P, A>
 where
     P: LeafPolicy,
     A: TreeAllocator<P>,
@@ -362,17 +382,21 @@ where
 
     /// Inserts the value into the vacant entry and returns it.
     #[inline(always)]
-    pub fn insert(self, value: P::Value) -> P::Output {
-        // Convert to output before insert, clone for return value
+    pub fn insert(self, value: P::Value) -> ValueRef<'e, P::Value> {
+        // Convert to output before insert
         let output = P::into_output(value);
-        let return_output = output.clone();
+
+        // SAFETY: `output` is the allocation being published into the tree;
+        // `self.guard` keeps it alive.
+        let value_ref: ValueRef<'e, P::Value> = unsafe { P::output_to_value_ref(&output) };
 
         // Insert using internal method that accepts P::Output
         // The return value (old value if any) is ignored since we're in a VacantEntry
         let _old = self
             .tree
             .insert_output_with_guard(self.key, output, self.guard);
-        return_output
+
+        value_ref
     }
 }
 
@@ -383,7 +407,7 @@ where
 impl<P, A> Debug for Entry<'_, '_, P, A>
 where
     P: LeafPolicy,
-    P::Output: Send + Sync + Debug,
+    P::Value: Send + Sync + Debug,
     A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
@@ -398,7 +422,7 @@ where
 impl<P, A> Debug for OccupiedEntry<'_, '_, P, A>
 where
     P: LeafPolicy,
-    P::Output: Send + Sync + Debug,
+    P::Value: Send + Sync + Debug,
     A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
@@ -412,7 +436,7 @@ where
 impl<P, A> Debug for VacantEntry<'_, '_, P, A>
 where
     P: LeafPolicy,
-    P::Output: Send + Sync + Debug,
+    P::Value: Send + Sync + Debug,
     A: TreeAllocator<P>,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {

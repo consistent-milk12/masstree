@@ -46,7 +46,7 @@ fn rw1fixed_single_thread() {
     for x in &keys {
         let key = x.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(u64::from(*x + 1)), "key {x} mismatch");
+        assert_eq!(*val.unwrap(), u64::from(*x + 1), "key {x} mismatch");
     }
 }
 

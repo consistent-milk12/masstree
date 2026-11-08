@@ -33,7 +33,7 @@ fn rw3_single_thread() {
     for n in 0..N {
         let key = n.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(n + 1), "key {n} mismatch");
+        assert_eq!(*val.unwrap(), n + 1, "key {n} mismatch");
     }
 }
 
@@ -61,7 +61,7 @@ fn rw3_concurrent() {
                 for n in start..end {
                     let key = n.to_be_bytes();
                     let val = tree.get_with_guard(&key, &guard);
-                    assert_eq!(val, Some(n + 1));
+                    assert_eq!(*val.unwrap(), n + 1);
                 }
             })
         })
@@ -106,6 +106,6 @@ fn rw3_interleaved() {
     for n in 0..total {
         let key = n.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(n + 1), "key {n} missing");
+        assert_eq!(*val.unwrap(), n + 1, "key {n} missing");
     }
 }

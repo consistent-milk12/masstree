@@ -57,7 +57,7 @@ fn rw16_single_thread() {
         let key = make_key16(*x);
         let expected = make_val16(*x);
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(expected), "key {x:016} mismatch");
+        assert_eq!(*val.unwrap(), expected, "key {x:016} mismatch");
     }
 }
 
@@ -117,6 +117,6 @@ fn rw16_sequential_keys() {
     for i in 0..N as i32 {
         let key = make_key16(i);
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(i as u64));
+        assert_eq!(*val.unwrap(), i as u64);
     }
 }

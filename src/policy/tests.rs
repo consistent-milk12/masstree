@@ -28,7 +28,7 @@ mod value_array_tests {
 
         assert!(!arr.is_empty(0));
         let loaded: ValuePtr<u64> = arr.load(0).unwrap();
-        assert_eq!(*loaded, 42);
+        assert_eq!(unsafe { *loaded.as_ref() }, 42);
 
         // Cleanup to avoid leak.
         unsafe { arr.cleanup(0) };
@@ -43,7 +43,7 @@ mod value_array_tests {
 
         assert!(!arr.is_empty(3));
         let loaded: ValuePtr<u64> = arr.load(3).unwrap();
-        assert_eq!(*loaded, 99);
+        assert_eq!(unsafe { *loaded.as_ref() }, 99);
 
         unsafe { arr.cleanup(3) };
     }
@@ -65,7 +65,7 @@ mod value_array_tests {
         }
 
         let loaded: ValuePtr<u64> = arr.load(5).unwrap();
-        assert_eq!(*loaded, 200);
+        assert_eq!(unsafe { *loaded.as_ref() }, 200);
 
         // Retire old value manually (in production, guard.defer_retire does this).
         if let RetireHandle::Ptr(ptr) = handle {
@@ -84,7 +84,7 @@ mod value_array_tests {
         assert!(!arr.is_empty(7));
 
         let taken: ValuePtr<u64> = arr.take(7).unwrap();
-        assert_eq!(*taken, 77);
+        assert_eq!(unsafe { *taken.as_ref() }, 77);
         assert!(arr.is_empty(7));
         assert!(arr.take(7).is_none());
 
@@ -126,7 +126,7 @@ mod value_array_tests {
         assert!(!dst.is_empty(9));
 
         let loaded: ValuePtr<u64> = dst.load(9).unwrap();
-        assert_eq!(*loaded, 33);
+        assert_eq!(unsafe { *loaded.as_ref() }, 33);
 
         unsafe { dst.cleanup(9) };
     }

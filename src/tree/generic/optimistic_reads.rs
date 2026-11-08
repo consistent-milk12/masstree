@@ -490,8 +490,8 @@ where
     {
         let guard: LocalGuard<'_> = self.guard();
 
-        self.get_with_guard(key, &guard)
-            .map(|output| P::clone_value_from_output(&output))
+        self.get_output_with_guard(key, &guard)
+            .map(|output| unsafe { P::clone_value_from_output(&output) })
     }
 
     /// Check if a key exists in the tree.

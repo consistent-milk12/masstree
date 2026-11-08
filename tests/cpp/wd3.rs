@@ -41,7 +41,7 @@ fn wd3_single_thread() {
         for i in 0..NK {
             let key = make_key(prefix, i);
             let val = tree.get_with_guard(&key, &guard);
-            assert_eq!(val, Some(i), "round {round}: key {i} should exist");
+            assert_eq!(*val.unwrap(), i, "round {round}: key {i} should exist");
         }
 
         // Remove phase
@@ -85,8 +85,8 @@ fn wd3_concurrent() {
                         let key = make_key(prefix.as_bytes(), i);
                         let val = tree.get_with_guard(&key, &guard);
                         assert_eq!(
-                            val,
-                            Some(i),
+                            *val.unwrap(),
+                            i,
                             "tid {tid}, round {round}: key {i} should exist"
                         );
                     }
@@ -134,7 +134,7 @@ fn wd3_with_prefix() {
         for i in 0..1000u64 {
             let key = make_key(prefix, i);
             let val = tree.get_with_guard(&key, &guard);
-            assert_eq!(val, Some(i), "round {round}: key {i} mismatch");
+            assert_eq!(*val.unwrap(), i, "round {round}: key {i} mismatch");
         }
 
         // Remove

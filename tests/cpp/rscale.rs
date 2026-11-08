@@ -39,7 +39,7 @@ fn rscale_single_thread() {
         let x: u64 = rng.random();
         let key = x.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(x + 1));
+        assert_eq!(*val.unwrap(), x + 1);
     }
 }
 
@@ -76,7 +76,7 @@ fn rscale_threads(num_threads: usize) {
                     let x: u64 = rng.random();
                     let key = x.to_be_bytes();
                     let val = tree.get_with_guard(&key, &guard);
-                    assert_eq!(val, Some(x + 1), "thread {tid} key mismatch");
+                    assert_eq!(*val.unwrap(), x + 1, "thread {tid} key mismatch");
                 }
             })
         })

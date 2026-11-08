@@ -93,6 +93,6 @@ fn w1_sequential_keys() {
     for i in (0..N as u64).step_by(1000) {
         let key = make_key10(i);
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(i + 1));
+        assert_eq!(*val.unwrap(), i + 1);
     }
 }

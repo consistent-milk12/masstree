@@ -8,7 +8,7 @@ use std::{
 use seize::{Collector, Guard, LocalGuard};
 
 use crate::{
-    BatchedRetire, Linker, MassTreeGeneric, TreeAllocator, TreePermutation,
+    BatchedRetire, Linker, MassTreeGeneric, TreeAllocator, TreePermutation, ValueRef,
     hints::{likely, unlikely},
     internode::InternodeNode,
     key::Key,
@@ -681,7 +681,7 @@ where
             }
         } else {
             let result = self.insert_with_guard(key, value, &guard);
-            result.map(|output| P::clone_value_from_output(&output))
+            result.map(|output| unsafe { P::clone_value_from_output(&output) })
         }
     }
 
@@ -780,7 +780,7 @@ where
             let output: P::Output = P::into_output(value);
 
             match self.insert_concurrent_generic(&mut key, output, guard) {
-                Ok(result) => result.map(|o| P::clone_value_from_output(&o)),
+                Ok(result) => result.map(|o| unsafe { P::clone_value_from_output(&o) }),
 
                 Err(e) => {
                     panic!(
@@ -825,22 +825,34 @@ where
         P::Value: Clone,
     {
         let guard: LocalGuard<'_> = self.guard();
-        let result: Option<P::Output> = self.remove_with_guard(key, &guard)?;
+        let result: Option<ValueRef<'_, P::Value>> = self.remove_with_guard(key, &guard)?;
 
-        Ok(result.map(|output: P::Output| P::clone_value_from_output(&output)))
+        Ok(result.map(ValueRef::into_owned))
     }
 
     /// Remove a key using an existing guard.
     ///
+    /// The returned value is scoped to `guard`: a removed write-through value
+    /// is an atomic copy, and a boxed value remains alive until the guard is
+    /// dropped even though it has already been scheduled for reclamation.
+    ///
     /// # Errors
     /// If fails to remove
-    pub fn remove_with_guard(
+    pub fn remove_with_guard<'g>(
         &self,
         key: &[u8],
-        guard: &LocalGuard<'_>,
-    ) -> Result<Option<P::Output>, RemoveError> {
+        guard: &'g LocalGuard<'_>,
+    ) -> Result<Option<ValueRef<'g, P::Value>>, RemoveError> {
         self.verify_guard(guard);
-        NodeCleaner::remove_concurrent_generic(self, key, guard)
+
+        let removed: Option<P::Output> =
+            NodeCleaner::remove_concurrent_generic(self, key, guard)?;
+
+        Ok(removed.map(|output: P::Output| {
+            // SAFETY: `output` was removed under `guard`; the allocation is
+            // retired but cannot be reclaimed until the guard is dropped.
+            unsafe { P::output_to_value_ref(&output) }
+        }))
     }
 
     /// Decrement the entry count after successful removal.

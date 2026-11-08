@@ -36,7 +36,7 @@ fn rw4_single_thread() {
         let key_val = TOP - n;
         let key = key_val.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(n + 1), "key {key_val} mismatch");
+        assert_eq!(*val.unwrap(), n + 1, "key {key_val} mismatch");
     }
 }
 
@@ -65,7 +65,7 @@ fn rw4_concurrent() {
                     let key_val = TOP - offset - n;
                     let key = key_val.to_be_bytes();
                     let val = tree.get_with_guard(&key, &guard);
-                    assert_eq!(val, Some(n + 1));
+                    assert_eq!(*val.unwrap(), n + 1);
                 }
             })
         })

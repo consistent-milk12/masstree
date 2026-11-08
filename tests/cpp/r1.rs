@@ -56,7 +56,7 @@ fn r1_single_thread() {
     for x in &keys {
         let key = make_key10(*x);
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(*x + 1), "key {x} mismatch");
+        assert_eq!(*val.unwrap(), *x + 1, "key {x} mismatch");
     }
 }
 
@@ -107,7 +107,7 @@ fn r1_concurrent(num_threads: usize) {
                     let x = keys[idx];
                     let key = make_key10(x);
                     let val = tree.get_with_guard(&key, &guard);
-                    assert_eq!(val, Some(x + 1));
+                    assert_eq!(*val.unwrap(), x + 1);
                 });
             })
         })
@@ -137,6 +137,6 @@ fn r1_hot_keys() {
         let x = hot_keys[rng.random_range(0..hot_keys.len())];
         let key = make_key10(x);
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(x + 1));
+        assert_eq!(*val.unwrap(), x + 1);
     }
 }

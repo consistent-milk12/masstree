@@ -46,7 +46,7 @@ fn rw1long_single_thread() {
     for (fmt, x) in &keys {
         let key = make_key(*fmt, *x);
         let val = tree.get_with_guard(key.as_bytes(), &guard);
-        assert_eq!(val, Some(u64::from(*x) + 1), "key {key} mismatch");
+        assert_eq!(*val.unwrap(), u64::from(*x) + 1, "key {key} mismatch");
     }
 }
 
@@ -77,7 +77,7 @@ fn rw1long_concurrent() {
                 for (fmt, x) in &keys {
                     let key = make_key(*fmt, *x);
                     let val = tree.get_with_guard(key.as_bytes(), &guard);
-                    assert_eq!(val, Some(u64::from(*x) + 1));
+                    assert_eq!(*val.unwrap(), u64::from(*x) + 1);
                 }
             })
         })

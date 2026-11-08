@@ -38,7 +38,7 @@ fn tri1_single_thread() {
         let key = (INITIAL_POS + i as u64 * incr).to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
         let expected = (LIMIT - 1 - i) as u64;
-        assert_eq!(val, Some(expected), "key {i} mismatch");
+        assert_eq!(*val.unwrap(), expected, "key {i} mismatch");
     }
 }
 
@@ -63,7 +63,7 @@ fn tri1_check() {
         let key = (INITIAL_POS + x as u64 * incr).to_be_bytes();
         let expected = (LIMIT - 1 - x) as u64;
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(expected), "check: key {x} mismatch");
+        assert_eq!(*val.unwrap(), expected, "check: key {x} mismatch");
     }
 }
 
@@ -96,7 +96,7 @@ fn tri1_concurrent() {
                     let key = (initial + i as u64 * incr).to_be_bytes();
                     let expected = (limit - 1 - i) as u64;
                     let val = tree.get_with_guard(&key, &guard);
-                    assert_eq!(val, Some(expected), "tid {tid}: key {i} mismatch");
+                    assert_eq!(*val.unwrap(), expected, "tid {tid}: key {i} mismatch");
                 }
             })
         })
@@ -122,5 +122,5 @@ fn tri1_stress_overwrites() {
 
     // Should have last value
     let val = tree.get_with_guard(&key, &guard);
-    assert_eq!(val, Some(9999));
+    assert_eq!(*val.unwrap(), 9999);
 }

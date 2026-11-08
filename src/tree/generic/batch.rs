@@ -1,3 +1,4 @@
+use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::sync::atomic::Ordering as AtomicOrdering;
 
 use seize::LocalGuard;
@@ -53,17 +54,18 @@ impl RetireBuf {
 // ============================================================================
 
 /// A single entry in a batch insert operation.
+///
+/// The entry owns a real user value; it never exposes a borrowed tree value
+/// handle that could alias a value still stored in the tree. Dropping an
+/// entry drops the value normally.
 #[must_use]
-#[expect(
-    missing_debug_implementations,
-    reason = "Debug on P::Output may not be available"
-)]
 pub struct BatchEntry<P: LeafPolicy> {
     /// The key bytes (owned for sorting).
-    pub key: Vec<u8>,
+    key: Vec<u8>,
 
-    /// The pre-converted output value.
-    pub output: P::Output,
+    /// The owned user value, converted to a storage output only when the
+    /// entry is inserted.
+    value: Option<P::Value>,
 
     /// Cached ikey for the first 8 bytes (used for sorting).
     ikey: u64,
@@ -71,22 +73,15 @@ pub struct BatchEntry<P: LeafPolicy> {
 
 impl<P: LeafPolicy> BatchEntry<P> {
     /// Create a new batch entry from key and value.
-    ///
-    /// Converts the value to output immediately to ensure single allocation.
     #[inline]
     pub fn new(key: Vec<u8>, value: P::Value) -> Self {
         let ikey: u64 = Self::compute_ikey(&key);
-        let output: P::Output = P::into_output(value);
 
-        Self { key, output, ikey }
-    }
-
-    /// Create a batch entry from key and pre-converted output.
-    #[inline(always)]
-    pub fn from_output(key: Vec<u8>, output: P::Output) -> Self {
-        let ikey: u64 = Self::compute_ikey(&key);
-
-        Self { key, output, ikey }
+        Self {
+            key,
+            value: Some(value),
+            ikey,
+        }
     }
 
     /// Compute the ikey (first 8 bytes as big-endian u64).
@@ -109,10 +104,66 @@ impl<P: LeafPolicy> BatchEntry<P> {
         self.ikey
     }
 
+    /// Get the key bytes.
+    #[inline(always)]
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    /// Get a reference to the owned value, if it has not been consumed.
+    #[inline(always)]
+    pub fn value(&self) -> Option<&P::Value> {
+        self.value.as_ref()
+    }
+
+    /// Take the owned value. Returns `None` if it was already consumed.
+    #[inline(always)]
+    pub fn into_value(mut self) -> Option<P::Value> {
+        self.value.take()
+    }
+
     /// Check if this key has a suffix (> 8 bytes).
     #[inline(always)]
     pub const fn has_suffix(&self) -> bool {
         self.key.len() > 8
+    }
+}
+
+impl<P: LeafPolicy> Debug for BatchEntry<P>
+where
+    P::Value: Debug,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
+        f.debug_struct("BatchEntry")
+            .field("key", &self.key)
+            .field("value", &self.value)
+            .finish()
+    }
+}
+
+/// Internal entry with a pre-converted output allocation.
+///
+/// Conversion happens once, outside the tree locks. Every entry is consumed by
+/// the batch loop (the fallback path inserts the remainder individually), so
+/// the output is never dropped without being published.
+struct OutputEntry<P: LeafPolicy> {
+    key: Vec<u8>,
+    output: P::Output,
+    ikey: u64,
+}
+
+impl<P: LeafPolicy> OutputEntry<P> {
+    #[inline]
+    fn from_value(key: Vec<u8>, value: P::Value) -> Self {
+        let ikey: u64 = BatchEntry::<P>::compute_ikey(&key);
+        let output: P::Output = P::into_output(value);
+
+        Self { key, output, ikey }
+    }
+
+    #[inline(always)]
+    const fn ikey(&self) -> u64 {
+        self.ikey
     }
 }
 
@@ -335,10 +386,10 @@ trait BatchOps<P: LeafPolicy, A: TreeAllocator<P>> {
 }
 
 // ============================================================================
-//  GenericBatch: wraps &[BatchEntry<P>] (pre-allocated outputs)
+//  GenericBatch: wraps &[OutputEntry<P>] (pre-allocated outputs)
 // ============================================================================
 
-struct GenericBatch<'a, P: LeafPolicy>(&'a [BatchEntry<P>]);
+struct GenericBatch<'a, P: LeafPolicy>(&'a [OutputEntry<P>]);
 
 impl<P: LeafPolicy, A: TreeAllocator<P>> BatchOps<P, A> for GenericBatch<'_, P> {
     type OldValue = P::Output;
@@ -378,7 +429,7 @@ impl<P: LeafPolicy, A: TreeAllocator<P>> BatchOps<P, A> for GenericBatch<'_, P> 
         lock: &mut LockGuard<'_>,
         guard: &LocalGuard<'_>,
     ) -> *mut u8 {
-        let entry: &BatchEntry<P> = &self.0[index];
+        let entry: &OutputEntry<P> = &self.0[index];
         let key: Key<'_> = Key::new(&entry.key);
         tree.insert_into_empty_leaf_batch(leaf, lock, &key, &entry.output, guard)
     }
@@ -394,7 +445,7 @@ impl<P: LeafPolicy, A: TreeAllocator<P>> BatchOps<P, A> for GenericBatch<'_, P> 
         guard: &LocalGuard<'_>,
         pre_allocated: Option<Vec<u8>>,
     ) -> BatchEntryResult<P::Output> {
-        let entry: &BatchEntry<P> = &self.0[index];
+        let entry: &OutputEntry<P> = &self.0[index];
         let key: Key<'_> = Key::new(&entry.key);
         let single_layer_mode: bool = !key.has_suffix();
 
@@ -461,7 +512,7 @@ impl<P: LeafPolicy, A: TreeAllocator<P>> BatchOps<P, A> for GenericBatch<'_, P> 
         result: &mut BatchInsertResult<P::Output>,
         guard: &LocalGuard<'_>,
     ) {
-        let entry: &BatchEntry<P> = &self.0[index];
+        let entry: &OutputEntry<P> = &self.0[index];
         let mut key: Key<'_> = Key::new(&entry.key);
 
         match tree.insert_concurrent_generic(&mut key, entry.output.clone(), guard) {
@@ -687,7 +738,7 @@ where
                 old_values: result
                     .old_values
                     .iter()
-                    .map(|o: &P::Output| P::clone_value_from_output(o))
+                    .map(|o: &P::Output| unsafe { P::clone_value_from_output(o) })
                     .collect(),
                 failed: result.failed,
             }
@@ -727,10 +778,10 @@ where
             };
         }
 
-        // Convert to BatchEntry (allocates outputs once)
-        let mut batch: Vec<BatchEntry<P>> = entries
+        // Convert to OutputEntry (allocates outputs once)
+        let mut batch: Vec<OutputEntry<P>> = entries
             .into_iter()
-            .map(|(key, value): (Vec<u8>, P::Value)| BatchEntry::new(key, value))
+            .map(|(key, value): (Vec<u8>, P::Value)| OutputEntry::from_value(key, value))
             .collect();
 
         if batch.is_empty() {
@@ -738,10 +789,10 @@ where
         }
 
         // Sort by ikey for cache locality and leaf clustering
-        batch.sort_unstable_by_key(BatchEntry::ikey);
+        batch.sort_unstable_by_key(OutputEntry::ikey);
 
         // Process the sorted batch
-        self.process_sorted_batch(&batch, guard)
+        self.process_sorted_batch(&mut batch, guard)
     }
 
     fn insert_batch_values_with_guard<I>(
@@ -767,9 +818,9 @@ where
 
     /// Insert pre-constructed batch entries.
     ///
-    /// Takes ownership of the entries to avoid cloning keys and outputs.
-    /// Use this when you need finer control over the batch entries,
-    /// or when retrying failed entries from a previous batch.
+    /// Takes ownership of the entries. Each entry owns a real user value; the
+    /// value is converted to its storage representation only here, once, and
+    /// the entry no longer aliases any value still stored in the tree.
     pub fn insert_batch_entries(
         &self,
         mut entries: Vec<BatchEntry<P>>,
@@ -780,10 +831,20 @@ where
             return BatchInsertResult::new();
         }
 
-        // Sort by ikey for cache locality
+        // Sort by ikey for cache locality, then convert to internal outputs.
         entries.sort_unstable_by_key(BatchEntry::ikey);
+        let mut outputs: Vec<OutputEntry<P>> = entries
+            .into_iter()
+            .map(|entry: BatchEntry<P>| {
+                let key: Vec<u8> = entry.key;
+                let value: P::Value = entry
+                    .value
+                    .expect("BatchEntry value already consumed before insertion");
+                OutputEntry::from_value(key, value)
+            })
+            .collect();
 
-        self.process_sorted_batch(&entries, guard)
+        self.process_sorted_batch(&mut outputs, guard)
     }
 
     // ========================================================================
@@ -795,7 +856,7 @@ where
     /// Delegates to `process_sorted_batch_inner` via `GenericBatch`.
     fn process_sorted_batch(
         &self,
-        batch: &[BatchEntry<P>],
+        batch: &mut [OutputEntry<P>],
         guard: &LocalGuard<'_>,
     ) -> BatchInsertResult<P::Output> {
         let mut ops: GenericBatch<'_, P> = GenericBatch(batch);

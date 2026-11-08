@@ -12,8 +12,7 @@ fn try_n(n: u64) -> bool {
     }
     drop(g);
     let e1 = BatchEntry::new(vec![0u8; 8], 1111u64);
-    let mut e2 = BatchEntry::new(Vec::new(), 2222u64);
-    e2.key = u64::MAX.to_be_bytes().to_vec();
+    let e2 = BatchEntry::new(u64::MAX.to_be_bytes().to_vec(), 2222u64);
     let _res = tree.insert_batch_entries(vec![e1, e2], &tree.guard());
     let got = tree.get(&u64::MAX.to_be_bytes());
     let nkeys = tree.iter(&tree.guard()).count();

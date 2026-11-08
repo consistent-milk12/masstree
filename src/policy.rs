@@ -28,7 +28,6 @@ pub use sidecar_suffix::SidecarSuffix;
 
 use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Display, Formatter};
-use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
@@ -74,7 +73,20 @@ pub(crate) fn is_atomic_word<V: 'static>() -> bool {
 //  ValuePtr<V>
 // ============================================================================
 
-/// A lightweight, `Copy` pointer to a heap-allocated value.
+/// An opaque, non-owning handle to a heap-allocated value.
+///
+/// `ValuePtr` deliberately has **no safe accessor**: a handle can outlive the
+/// EBR guard (and the tree) that keeps the allocation alive, so any safe
+/// dereference would be a use-after-free in safe code. It also cannot expose a
+/// plain `&V` while the value participates in write-through updates, because a
+/// concurrent update writes the allocation through an atomic.
+///
+/// Use the guard-scoped accessors on the tree instead ([`get`], [`get_ref`],
+/// [`ValueRef`], or the iterator adapters). Internal code that has already
+/// validated OCC and holds a guard may use [`as_ref`](Self::as_ref).
+///
+/// [`get`]: crate::MassTreeGeneric::get
+/// [`get_ref`]: crate::MassTreeGeneric::get_ref
 #[repr(transparent)]
 pub struct ValuePtr<V>(NonNull<V>);
 
@@ -93,8 +105,24 @@ impl<V> ValuePtr<V> {
 
     /// Get the raw pointer.
     #[inline(always)]
-    pub(crate) const fn as_ptr(self) -> *mut V {
+    pub const fn as_ptr(self) -> *mut V {
         self.0.as_ptr()
+    }
+
+    /// Borrow the pointed-to value.
+    ///
+    /// # Safety
+    ///
+    /// - The caller must hold an EBR guard that keeps the allocation alive.
+    /// - The caller must have validated the OCC version (or otherwise hold the
+    ///   leaf lock) after obtaining this handle.
+    /// - For write-through values, the caller must not form this reference
+    ///   while another thread may perform an in-place atomic update.
+    /// - The reference must not outlive the guard.
+    #[inline(always)]
+    pub unsafe fn as_ref<'g>(&self) -> &'g V {
+        // SAFETY: Contract of the caller.
+        unsafe { self.0.as_ref() }
     }
 }
 
@@ -108,68 +136,17 @@ impl<V> Clone for ValuePtr<V> {
     }
 }
 
-// Deref to &V for convenient field access and method calls.
-impl<V> Deref for ValuePtr<V> {
-    type Target = V;
-
-    #[inline(always)]
-    fn deref(&self) -> &V {
-        // SAFETY: The pointer is valid as long as the EBR guard is held.
-        unsafe { self.0.as_ref() }
-    }
-}
-
-// SAFETY: ValuePtr<V> is Send when V: Send + Sync.
+// SAFETY: ValuePtr<V> is an inert, non-dereferenceable pointer value.
 unsafe impl<V: Send + Sync> Send for ValuePtr<V> {}
 
-// SAFETY: ValuePtr<V> is Sync when V: Send + Sync.
-// Sharing &ValuePtr across threads is safe because Deref yields &V,
-// and V: Sync means &V can be shared.
+// SAFETY: ValuePtr<V> is an inert, non-dereferenceable pointer value.
 unsafe impl<V: Send + Sync> Sync for ValuePtr<V> {}
 
-impl<V: Debug> Debug for ValuePtr<V> {
+impl<V> Debug for ValuePtr<V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
-        Debug::fmt(&**self, f)
-    }
-}
-
-impl<V: PartialEq> PartialEq for ValuePtr<V> {
-    #[inline(always)]
-    fn eq(&self, other: &Self) -> bool {
-        **self == **other
-    }
-}
-
-impl<V: Eq> Eq for ValuePtr<V> {}
-
-impl<V: Display> Display for ValuePtr<V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> StdFmt::Result {
-        Display::fmt(&**self, f)
-    }
-}
-
-impl<V: Hash> Hash for ValuePtr<V> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (**self).hash(state);
-    }
-}
-
-impl<V: PartialOrd> PartialOrd for ValuePtr<V> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        (**self).partial_cmp(&**other)
-    }
-}
-
-impl<V: Ord> Ord for ValuePtr<V> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (**self).cmp(&**other)
-    }
-}
-
-impl<V> AsRef<V> for ValuePtr<V> {
-    #[inline(always)]
-    fn as_ref(&self) -> &V {
-        self
+        // Never read through the pointer: it may be stale, and a write-through
+        // update can be running concurrently.
+        f.debug_tuple("ValuePtr").field(&self.0.as_ptr()).finish()
     }
 }
 
@@ -649,7 +626,14 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     }
 
     /// Clone an owned `Value` from an `Output` reference.
-    fn clone_value_from_output(output: &Self::Output) -> Self::Value
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold an EBR guard that keeps the output's allocation
+    /// alive and must have validated the OCC version (or hold the leaf lock).
+    /// A handle obtained from a public API and retained past its guard must not
+    /// be passed here.
+    unsafe fn clone_value_from_output(output: &Self::Output) -> Self::Value
     where
         Self::Value: Clone;
 
@@ -669,6 +653,21 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     /// - `ptr` must be a non-null pointer previously stored in a value slot.
     /// - The caller must ensure appropriate synchronization (typically under lock).
     unsafe fn output_from_retire_ptr(ptr: *mut u8) -> Self::Output;
+
+    /// Convert an output handle obtained under `guard` into a guard-scoped
+    /// value reference.
+    ///
+    /// This is the only supported way for public APIs to hand a value back to
+    /// a caller: the returned [`ValueRef`] cannot outlive the EBR guard, and
+    /// write-through values are copied atomically instead of being borrowed.
+    ///
+    /// # Safety
+    ///
+    /// - The caller must hold the EBR guard under which `output` was obtained.
+    /// - For a value loaded from a leaf, the OCC version must have been
+    ///   validated after the load (or the leaf lock must be held).
+    /// - The returned reference must not outlive the guard.
+    unsafe fn output_to_value_ref<'g>(output: &Self::Output) -> ValueRef<'g, Self::Value>;
 
     // ========================================================================
     //  Retirement
@@ -739,7 +738,13 @@ pub trait RefPolicy: sealed::RefPolicySealed + LeafPolicy {
     ///
     /// For non-write-through types only. For write-through types, use
     /// [`output_as_ref_sound`](Self::output_as_ref_sound) instead.
-    fn output_as_ref(output: &Self::Output) -> &Self::Value;
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold an EBR guard that keeps the allocation alive and
+    /// must have validated the OCC version (or hold the leaf lock). The
+    /// returned reference must not outlive the guard.
+    unsafe fn output_as_ref(output: &Self::Output) -> &Self::Value;
 
     /// Soundly read a value reference from an output handle.
     ///
@@ -847,7 +852,7 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
     }
 
     #[inline(always)]
-    fn clone_value_from_output(output: &ValuePtr<V>) -> V
+    unsafe fn clone_value_from_output(output: &ValuePtr<V>) -> V
     where
         V: Clone,
     {
@@ -858,7 +863,10 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
             // write_through_update.
             unsafe { atomic_read_value::<V>(output.as_ptr().cast(), READ_ORD) }
         } else {
-            (**output).clone()
+            // SAFETY: Caller holds the guard under which the output was
+            // obtained; non-write-through updates replace the allocation
+            // rather than mutating it.
+            unsafe { output.as_ref() }.clone()
         }
     }
 
@@ -867,6 +875,20 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
         debug_assert!(!ptr.is_null());
         // SAFETY: ptr was stored via Box::into_raw in into_output().
         unsafe { ValuePtr::from_raw(ptr.cast::<V>()) }
+    }
+
+    #[inline(always)]
+    unsafe fn output_to_value_ref<'g>(output: &ValuePtr<V>) -> ValueRef<'g, V> {
+        if Self::can_write_through() {
+            // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with natural
+            // alignment. Atomic read avoids aliasing a concurrent in-place
+            // write-through update.
+            ValueRef::Owned(unsafe { atomic_read_value::<V>(output.as_ptr().cast(), READ_ORD) })
+        } else {
+            // SAFETY: Caller holds the guard; non-write-through updates
+            // replace the allocation instead of mutating it.
+            ValueRef::Borrowed(unsafe { output.as_ref() })
+        }
     }
 
     #[inline(always)]
@@ -933,8 +955,9 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
 
 impl<V: Send + Sync + 'static> RefPolicy for BoxPolicy<V> {
     #[inline(always)]
-    fn output_as_ref(output: &ValuePtr<V>) -> &V {
-        output
+    unsafe fn output_as_ref(output: &ValuePtr<V>) -> &V {
+        // SAFETY: Caller guarantees a guard and OCC validation.
+        unsafe { output.as_ref() }
     }
 
     #[inline(always)]
@@ -955,7 +978,7 @@ impl<V: Send + Sync + 'static> RefPolicy for BoxPolicy<V> {
         } else {
             // SAFETY: Non-write-through types allocate a new Box on update,
             // so the existing allocation is immutable while the guard is held.
-            Self::output_as_ref(output)
+            unsafe { Self::output_as_ref(output) }
         }
     }
 }
@@ -1015,7 +1038,7 @@ impl<V: InlineBits> LeafPolicy for InlinePolicy<V> {
     }
 
     #[inline(always)]
-    fn clone_value_from_output(output: &V) -> V
+    unsafe fn clone_value_from_output(output: &V) -> V
     where
         V: Clone,
     {
@@ -1025,6 +1048,13 @@ impl<V: InlineBits> LeafPolicy for InlinePolicy<V> {
     #[inline(always)]
     unsafe fn output_from_retire_ptr(_ptr: *mut u8) -> V {
         unreachable!("inline values have no retired pointer")
+    }
+
+    #[inline(always)]
+    unsafe fn output_to_value_ref<'g>(output: &V) -> ValueRef<'g, V> {
+        // Inline values are plain `Copy` words stored in the leaf; hand the
+        // caller an owned copy so no reference into the leaf escapes.
+        ValueRef::Owned(*output)
     }
 
     #[inline(always)]

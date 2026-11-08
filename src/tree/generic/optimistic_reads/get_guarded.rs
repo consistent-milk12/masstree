@@ -2,7 +2,7 @@ use seize::LocalGuard;
 
 use crate::leaf15::LeafNode15;
 use crate::{
-    LeafPolicy, MassTreeGeneric, NodeVersion, TreeAllocator,
+    LeafPolicy, MassTreeGeneric, NodeVersion, TreeAllocator, ValueRef,
     hints::unlikely,
     key::Key,
     tree::generic::optimistic_reads::{
@@ -15,17 +15,39 @@ where
     P: LeafPolicy,
     A: TreeAllocator<P>,
 {
-    /// Get a value by key, returning a clone of the output.
+    /// Get a value by key, returning a guard-scoped value reference.
     ///
-    /// Main read path for `get()` and `get_with_guard()`. Returns an owned
-    /// `P::Output` via `load_value` (which copies the value). Includes an
+    /// The returned [`ValueRef`] cannot outlive `guard`. Write-through values
+    /// are copied atomically into [`ValueRef::Owned`]; other policies return a
+    /// borrow that is kept alive by the EBR guard.
+    ///
+    /// Main read path for `get_ref`. Returns an owned `P::Output` internally
+    /// via `load_value` (which copies the handle). Includes an
     /// `is_value_empty` re-check after OCC validation for defense-in-depth.
-    ///
-    /// A separate closure-based implementation (`get_impl` in the parent module)
-    /// exists for `get_ref`, which must return `&'g P::Value` tied to the EBR
-    /// guard lifetime. That path uses `load_value_raw` with an `extract` closure.
     #[inline(always)]
-    pub fn get_with_guard(&self, key: &[u8], guard: &LocalGuard<'_>) -> Option<P::Output> {
+    pub fn get_with_guard<'g>(
+        &self,
+        key: &[u8],
+        guard: &'g LocalGuard<'_>,
+    ) -> Option<ValueRef<'g, P::Value>> {
+        let output: P::Output = self.get_output_with_guard(key, guard)?;
+
+        // SAFETY: `output` was loaded under `guard` and validated by OCC in
+        // `get_output_with_guard`. The handle points at a heap allocation that
+        // the guard keeps alive; write-through values are copied atomically.
+        Some(unsafe { P::output_to_value_ref(&output) })
+    }
+
+    /// Internal output-returning lookup used by range scans and batch code.
+    ///
+    /// The caller must keep `guard` alive for as long as the returned handle
+    /// is dereferenced.
+    #[inline(always)]
+    pub(crate) fn get_output_with_guard(
+        &self,
+        key: &[u8],
+        guard: &LocalGuard<'_>,
+    ) -> Option<P::Output> {
         self.verify_guard(guard);
         let mut key: Key<'_> = Key::new(key);
 

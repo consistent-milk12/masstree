@@ -1460,9 +1460,9 @@ fn test_masstree15_update_existing() {
     assert_eq!(*tree.get_with_guard(b"key", &guard).unwrap(), 100);
 
     // Update the value
-    let old = tree.insert_with_guard(b"key", 200, &guard);
+    let old = tree.insert_value_with_guard(b"key", 200, &guard);
     assert!(old.is_some());
-    assert_eq!(*old.unwrap(), 100);
+    assert_eq!(old.unwrap(), 100);
 
     // Verify updated value
     assert_eq!(*tree.get_with_guard(b"key", &guard).unwrap(), 200);
@@ -1775,7 +1775,7 @@ fn test_masstree15_inline() {
     for i in 0u64..100 {
         let key = i.to_be_bytes();
         let result = tree.get_with_guard(&key, &guard);
-        assert_eq!(result, Some(i));
+        assert_eq!(*result.unwrap(), i);
     }
 }
 
@@ -2088,8 +2088,8 @@ fn test_from_iterator_inline() {
     assert_eq!(tree.len(), 2);
 
     let guard = tree.guard();
-    assert_eq!(tree.get_with_guard(b"x", &guard), Some(10));
-    assert_eq!(tree.get_with_guard(b"y", &guard), Some(20));
+    assert_eq!(*tree.get_with_guard(b"x", &guard).unwrap(), 10);
+    assert_eq!(*tree.get_with_guard(b"y", &guard).unwrap(), 20);
 }
 
 #[test]

@@ -36,7 +36,7 @@ fn dup_old_values() {
 }
 
 fn mutate_ikey() {
-    // Demonstrate stale cached ikey from public mutable fields corrupts leaf ordering.
+    // Public batch entries own their keys; there is no mutable key cache to corrupt.
     let tree: MassTree15<u64> = MassTree15::new();
     let g = tree.guard();
     for i in 0..16u64 {
@@ -45,8 +45,7 @@ fn mutate_ikey() {
     drop(g);
 
     let e1 = BatchEntry::new(vec![0u8; 8], 1111u64);
-    let mut e2 = BatchEntry::new(Vec::new(), 2222u64);
-    e2.key = 0x00ff_ffff_ffff_ffffu64.to_be_bytes().to_vec();
+    let e2 = BatchEntry::new(0x00ff_ffff_ffff_ffffu64.to_be_bytes().to_vec(), 2222u64);
     let res = tree.insert_batch_entries(vec![e1, e2], &tree.guard());
     println!("mutate: inserted={} updated={} total={}", res.inserted, res.updated, res.total());
     println!("  get(0x00ff..) = {:?} (expected Some(1111))", tree.get(&0x00ff_ffff_ffff_ffffu64.to_be_bytes()));

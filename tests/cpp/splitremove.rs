@@ -44,7 +44,7 @@ fn splitremove_sequential() {
         if n % 2 == 0 {
             assert!(val.is_none(), "key {n} should be removed");
         } else {
-            assert_eq!(val, Some(n), "key {n} should exist");
+            assert_eq!(*val.unwrap(), n, "key {n} should exist");
         }
     }
 }
@@ -181,7 +181,7 @@ fn splitremove_reinsert() {
         for n in 0u64..1000 {
             let key = n.to_be_bytes();
             let val = tree.get_with_guard(&key, &guard);
-            assert_eq!(val, Some(n + cycle * 1000));
+            assert_eq!(*val.unwrap(), n + cycle * 1000);
         }
 
         // Remove all

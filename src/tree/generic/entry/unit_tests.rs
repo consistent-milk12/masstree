@@ -1,7 +1,7 @@
 #![expect(clippy::unwrap_used)]
 #![expect(clippy::panic)]
 
-use crate::policy::ValuePtr;
+use crate::policy::ValueRef;
 
 use seize::LocalGuard;
 
@@ -17,7 +17,7 @@ fn test_entry_or_insert_vacant() {
     let guard: LocalGuard<'_> = tree.guard();
 
     // Key doesn't exist, should insert
-    let value: ValuePtr<u64> = tree.entry_with_guard(b"key", &guard).or_insert(42);
+    let value: ValueRef<'_, u64> = tree.entry_with_guard(b"key", &guard).or_insert(42);
     assert_eq!(*value, 42);
     assert_eq!(tree.len(), 1);
 
@@ -34,7 +34,7 @@ fn test_entry_or_insert_occupied() {
     tree.insert_with_guard(b"key", 100, &guard);
 
     // Key exists, should return existing value, not insert
-    let value: ValuePtr<u64> = tree.entry_with_guard(b"key", &guard).or_insert(42);
+    let value: ValueRef<'_, u64> = tree.entry_with_guard(b"key", &guard).or_insert(42);
     assert_eq!(*value, 100);
     assert_eq!(tree.len(), 1);
 }
@@ -45,11 +45,11 @@ fn test_entry_or_insert() {
     let guard: LocalGuard<'_> = tree.guard();
 
     // Insert on vacant
-    let result: ValuePtr<u64> = tree.entry_with_guard(b"key", &guard).or_insert(42);
+    let result: ValueRef<'_, u64> = tree.entry_with_guard(b"key", &guard).or_insert(42);
     assert_eq!(*result, 42);
 
     // Insert on occupied returns cached value
-    let result: ValuePtr<u64> = tree.entry_with_guard(b"key", &guard).or_insert(100);
+    let result: ValueRef<'_, u64> = tree.entry_with_guard(b"key", &guard).or_insert(100);
     assert_eq!(*result, 42); // Original value, not 100
 }
 
@@ -65,7 +65,7 @@ fn test_entry_or_insert_with_lazy() {
     let guard: LocalGuard<'_> = tree.guard();
 
     let mut called: Bool = Bool::False;
-    let value: ValuePtr<u64> = tree.entry_with_guard(b"key", &guard).or_insert_with(|| {
+    let value: ValueRef<'_, u64> = tree.entry_with_guard(b"key", &guard).or_insert_with(|| {
         called = Bool::True;
         99
     });
@@ -82,7 +82,7 @@ fn test_entry_or_insert_with_not_called_when_occupied() {
     tree.insert_with_guard(b"key", 50, &guard);
 
     let mut called = false;
-    let value: ValuePtr<u64> = tree.entry_with_guard(b"key", &guard).or_insert_with(|| {
+    let value: ValueRef<'_, u64> = tree.entry_with_guard(b"key", &guard).or_insert_with(|| {
         called = true;
         99
     });
@@ -97,7 +97,7 @@ fn test_entry_or_insert_with_key() {
     let guard: LocalGuard<'_> = tree.guard();
 
     // Insert based on key length
-    let value: ValuePtr<u64> = tree
+    let value: ValueRef<'_, u64> = tree
         .entry_with_guard(b"hello", &guard)
         .or_insert_with_key(|k: &[u8]| k.len() as u64);
 
@@ -111,10 +111,10 @@ fn test_entry_and_modify_occupied() {
 
     tree.insert_with_guard(b"counter", 10, &guard);
 
-    // Modify existing value (ValuePtr<u64>: dereference twice - &ValuePtr -> ValuePtr -> u64)
-    let value: ValuePtr<u64> = tree
+    // Modify existing value (ValueRef<u64>: one deref to u64)
+    let value: ValueRef<'_, u64> = tree
         .entry_with_guard(b"counter", &guard)
-        .and_modify(|v: &ValuePtr<u64>| **v + 5)
+        .and_modify(|v: &u64| *v + 5)
         .or_insert(0);
 
     assert_eq!(*value, 15);
@@ -128,7 +128,7 @@ fn test_entry_and_modify_vacant() {
     // and_modify should be skipped for vacant, or_insert should run
     let value = tree
         .entry_with_guard(b"counter", &guard)
-        .and_modify(|v: &ValuePtr<u64>| **v + 100) // Should not be called
+        .and_modify(|v: &u64| *v + 100) // Should not be called
         .or_insert(0);
 
     assert_eq!(*value, 0);
@@ -144,10 +144,10 @@ fn test_entry_try_and_modify() {
     // and_modify
     let result = tree
         .entry_with_guard(b"counter", &guard)
-        .and_modify(|v: &ValuePtr<u64>| **v + 5);
+        .and_modify(|v: &u64| *v + 5);
 
     match result {
-        Entry::Occupied(o) => assert_eq!(**o.get(), 15),
+        Entry::Occupied(o) => assert_eq!(*o.get(), 15),
 
         Entry::Vacant(_) => panic!("Expected Occupied"),
     }
@@ -162,7 +162,7 @@ fn test_entry_occupied_get() {
 
     match tree.entry_with_guard(b"key", &guard) {
         Entry::Occupied(o) => {
-            assert_eq!(**o.get(), 42);
+            assert_eq!(*o.get(), 42);
             assert_eq!(o.key(), b"key");
         }
 
@@ -181,7 +181,7 @@ fn test_entry_occupied_insert_returns_old() {
         Entry::Occupied(mut o) => {
             let old = o.insert(20);
             assert_eq!(*old.unwrap(), 10); // Returns Some(old)
-            assert_eq!(**o.get(), 20); // Cached value updated
+            assert_eq!(*o.get(), 20); // Cached value updated
         }
 
         Entry::Vacant(_) => panic!("Expected Occupied"),
@@ -238,7 +238,7 @@ fn test_entry_occupied_try_remove() {
 
     match tree.entry_with_guard(b"key", &guard) {
         Entry::Occupied(o) => {
-            let result: Result<Option<ValuePtr<u64>>, crate::RemoveError> = o.try_remove();
+            let result: Result<Option<ValueRef<'_, u64>>, crate::RemoveError> = o.try_remove();
             assert!(result.is_ok());
             assert_eq!(*result.unwrap().unwrap(), 42);
         }
@@ -337,7 +337,7 @@ fn test_entry_insert_entry_from_vacant() {
     // Start vacant, insert_entry returns OccupiedEntry
     let occupied = tree.entry_with_guard(b"key", &guard).insert_entry(42);
 
-    assert_eq!(**occupied.get(), 42);
+    assert_eq!(*occupied.get(), 42);
     assert_eq!(occupied.key(), b"key");
 
     // Verify in tree
@@ -354,7 +354,7 @@ fn test_entry_insert_entry_from_occupied() {
     // Start occupied, insert_entry replaces
     let occupied = tree.entry_with_guard(b"key", &guard).insert_entry(42);
 
-    assert_eq!(**occupied.get(), 42);
+    assert_eq!(*occupied.get(), 42);
     assert_eq!(*tree.get_with_guard(b"key", &guard).unwrap(), 42);
 }
 
@@ -364,7 +364,7 @@ fn test_entry_try_insert_entry() {
     let guard: LocalGuard<'_> = tree.guard();
 
     let result = tree.entry_with_guard(b"key", &guard).insert_entry(42);
-    assert_eq!(**result.get(), 42);
+    assert_eq!(*result.get(), 42);
 }
 
 #[test]
@@ -379,7 +379,7 @@ fn test_entry_get_on_entry() {
     // Insert and check again
     tree.insert_with_guard(b"key", 42, &guard);
     let entry = tree.entry_with_guard(b"key", &guard);
-    assert_eq!(**entry.get().unwrap(), 42);
+    assert_eq!(*entry.get().unwrap(), 42);
 }
 
 #[test]
@@ -421,10 +421,10 @@ fn test_entry_multiple_operations() {
     let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
-    // Simulate a counter pattern (ValuePtr<u64>: dereference twice)
+    // Simulate a counter pattern (ValueRef<'_, u64>: dereference twice)
     for _ in 0..10 {
         tree.entry_with_guard(b"counter", &guard)
-            .and_modify(|v| **v + 1)
+            .and_modify(|v| *v + 1)
             .or_insert(1);
     }
 
@@ -456,16 +456,16 @@ fn test_entry_long_key() {
     // Key longer than 8 bytes (triggers multi-layer path)
     let long_key: &'static [u8; 48] = b"this_is_a_very_long_key_that_exceeds_eight_bytes";
 
-    let value: ValuePtr<u64> = tree.entry_with_guard(long_key, &guard).or_insert(42);
+    let value: ValueRef<'_, u64> = tree.entry_with_guard(long_key, &guard).or_insert(42);
     assert_eq!(*value, 42);
 
     // Verify retrieval
     assert_eq!(*tree.get_with_guard(long_key, &guard).unwrap(), 42);
 
-    // Modify (ValuePtr<u64>: dereference twice)
-    let value: ValuePtr<u64> = tree
+    // Modify (ValueRef<'_, u64>: dereference twice)
+    let value: ValueRef<'_, u64> = tree
         .entry_with_guard(long_key, &guard)
-        .and_modify(|v: &ValuePtr<u64>| **v * 2)
+        .and_modify(|v: &u64| *v * 2)
         .or_insert(0);
     assert_eq!(*value, 84);
 }
@@ -493,12 +493,12 @@ fn test_entry_or_default() {
     let guard: LocalGuard<'_> = tree.guard();
 
     // or_default on vacant - uses Default::default() = 0
-    let value: ValuePtr<u64> = tree.entry_with_guard(b"counter", &guard).or_default();
+    let value: ValueRef<'_, u64> = tree.entry_with_guard(b"counter", &guard).or_default();
     assert_eq!(*value, 0);
 
     // Modify and or_default on occupied - returns cached value
     tree.insert_with_guard(b"other", 42, &guard);
-    let value: ValuePtr<u64> = tree.entry_with_guard(b"other", &guard).or_default();
+    let value: ValueRef<'_, u64> = tree.entry_with_guard(b"other", &guard).or_default();
     assert_eq!(*value, 42);
 }
 
@@ -507,10 +507,10 @@ fn test_entry_or_default_with_and_modify() {
     let tree: MassTree15<u64> = MassTree15::new();
     let guard: LocalGuard<'_> = tree.guard();
 
-    // Counter pattern using or_default (ValuePtr<u64>: dereference twice)
+    // Counter pattern using or_default (ValueRef<'_, u64>: dereference twice)
     for _ in 0..5 {
         tree.entry_with_guard(b"counter", &guard)
-            .and_modify(|v: &ValuePtr<u64>| **v + 1)
+            .and_modify(|v: &u64| *v + 1)
             .or_default();
     }
 
@@ -525,14 +525,14 @@ fn test_entry_or_try_insert_with_key() {
     let guard: LocalGuard<'_> = tree.guard();
 
     // Insert based on key length
-    let result: ValuePtr<u64> = tree
+    let result: ValueRef<'_, u64> = tree
         .entry_with_guard(b"hello", &guard)
         .or_insert_with_key(|k| k.len() as u64);
 
     assert_eq!(*result, 5); // "hello".len() == 5
 
     // On occupied - returns cached value, closure not called
-    let result: ValuePtr<u64> = tree
+    let result: ValueRef<'_, u64> = tree
         .entry_with_guard(b"hello", &guard)
         .or_insert_with_key(|_| 999);
 

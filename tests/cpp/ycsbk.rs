@@ -47,7 +47,7 @@ fn ycsbk_single_thread() {
         let _regenerated_key = make_ycsb_key(&mut rng); // consume to keep rng in sync
         let expected_val: u32 = rng.random();
         let val = tree.get_with_guard(key.as_bytes(), &guard);
-        assert_eq!(val, Some(u64::from(expected_val)), "key {key} mismatch");
+        assert_eq!(*val.unwrap(), u64::from(expected_val), "key {key} mismatch");
     }
 }
 

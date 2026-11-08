@@ -117,7 +117,7 @@ fn rwsep24_no_contention_scaling() {
                     let i = rng.random_range(0..10_000u64);
                     let key = (base + i).to_be_bytes();
                     let val = tree.get_with_guard(&key, &guard);
-                    assert_eq!(val, Some(i));
+                    assert_eq!(*val.unwrap(), i);
                 }
             })
         })

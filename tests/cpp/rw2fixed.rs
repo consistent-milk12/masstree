@@ -37,7 +37,7 @@ fn rw2fixed_impl(get_frac: f64) {
             let key = x.to_be_bytes();
             let val = tree.get_with_guard(&key, &guard);
             assert!(val.is_some(), "key {x} should exist");
-            assert_eq!(val, Some(u64::from(x + 1)));
+            assert_eq!(*val.unwrap(), u64::from(x + 1));
             gets += 1;
         } else {
             // Insert

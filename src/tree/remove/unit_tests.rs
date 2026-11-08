@@ -1559,7 +1559,7 @@ fn test_coalesce_with_range_scan() {
         |k: &[u8], v: ValuePtr<u64>| {
             let key = u64::from_be_bytes(k.try_into().unwrap());
             found.push(key);
-            assert_eq!(*v, key, "Value should match key");
+            assert_eq!(unsafe { *v.as_ref() }, key, "Value should match key");
             true
         },
         &guard,

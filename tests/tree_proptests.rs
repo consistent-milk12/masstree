@@ -1329,7 +1329,7 @@ fn verify_full_scan(
     let mut tree_entries: Vec<(Vec<u8>, u64)> = Vec::new();
     for e in tree.iter(&guard) {
         let (k, v) = e.into_parts();
-        tree_entries.push((k, *v));
+        tree_entries.push((k, unsafe { *v.as_ref() }));
         if tree_entries.len() > limit {
             prop_assert!(
                 false,
@@ -1353,7 +1353,7 @@ fn verify_reverse_iter(
     let mut tree_entries: Vec<(Vec<u8>, u64)> = Vec::new();
     for e in tree.iter(&guard).rev() {
         let (k, v) = e.into_parts();
-        tree_entries.push((k, *v));
+        tree_entries.push((k, unsafe { *v.as_ref() }));
         if tree_entries.len() > limit {
             prop_assert!(
                 false,
@@ -1475,7 +1475,7 @@ proptest! {
                         .iter(&guard)
                         .map(|e| {
                             let (k, v) = e.into_parts();
-                            (k, *v)
+                            (k, unsafe { *v.as_ref() })
                         })
                         .collect();
                     let oracle_entries: Vec<(Vec<u8>, u64)> =

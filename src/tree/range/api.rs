@@ -127,7 +127,7 @@ where
     {
         let guard = self.guard();
         self.first_with_guard(&guard)
-            .map(|entry| ScanEntry::new(entry.key, P::clone_value_from_output(&entry.value)))
+            .map(|entry| ScanEntry::new(entry.key, unsafe { P::clone_value_from_output(&entry.value) }))
     }
 
     /// Get the first (smallest) key-value pair using an existing guard.
@@ -152,7 +152,7 @@ where
     {
         let guard = self.guard();
         self.last_with_guard(&guard)
-            .map(|entry| ScanEntry::new(entry.key, P::clone_value_from_output(&entry.value)))
+            .map(|entry| ScanEntry::new(entry.key, unsafe { P::clone_value_from_output(&entry.value) }))
     }
 
     /// Get the last (largest) key-value pair using an existing guard.
@@ -413,7 +413,7 @@ where
             let prefix_at_chunk_boundary = prefix.len() == descended_chunks * IKEY_SIZE;
 
             if prefix_at_chunk_boundary {
-                let exact_value = self.get_with_guard(prefix, guard);
+                let exact_value = self.get_output_with_guard(prefix, guard);
                 let iter = self.range_forward_from_root(
                     layer_root,
                     cursor,

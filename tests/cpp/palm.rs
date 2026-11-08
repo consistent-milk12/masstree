@@ -34,7 +34,7 @@ fn palma_sequential_insert() {
     for i in (0..PALM_N).step_by(1000) {
         let key = i.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(i + 1));
+        assert_eq!(*val.unwrap(), i + 1);
     }
 }
 
@@ -71,7 +71,7 @@ fn palmb_batched_reads() {
         for &x in &batch {
             let key = x.to_be_bytes();
             let val = tree.get_with_guard(&key, &guard);
-            assert_eq!(val, Some(x + 1), "key {x} mismatch");
+            assert_eq!(*val.unwrap(), x + 1, "key {x} mismatch");
         }
     }
 }
@@ -108,7 +108,7 @@ fn palm_concurrent_insert() {
     for i in 0..PALM_N {
         let key = i.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(i + 1), "key {i} missing");
+        assert_eq!(*val.unwrap(), i + 1, "key {i} missing");
     }
 }
 
@@ -151,7 +151,7 @@ fn palm_concurrent_read() {
                     for &x in &batch {
                         let key = x.to_be_bytes();
                         let val = tree.get_with_guard(&key, &guard);
-                        assert_eq!(val, Some(x + 1));
+                        assert_eq!(*val.unwrap(), x + 1);
                     }
                 }
             })

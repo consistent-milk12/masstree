@@ -112,6 +112,6 @@ fn url_shared_prefix_stress() {
     for i in 0..N {
         let url = format!("{domain}{i}");
         let val = tree.get_with_guard(url.as_bytes(), &guard);
-        assert_eq!(val, Some(i as u64));
+        assert_eq!(*val.unwrap(), i as u64);
     }
 }

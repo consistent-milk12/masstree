@@ -39,7 +39,7 @@ fn rw1_single_thread() {
     for x in &keys {
         let key = x.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(x.wrapping_add(1)), "key {x} mismatch");
+        assert_eq!(*val.unwrap(), x.wrapping_add(1), "key {x} mismatch");
     }
 }
 
@@ -72,7 +72,7 @@ fn rw1_concurrent() {
                 for x in &keys {
                     let key = x.to_be_bytes();
                     let val = tree.get_with_guard(&key, &guard);
-                    assert_eq!(val, Some(x.wrapping_add(1)));
+                    assert_eq!(*val.unwrap(), x.wrapping_add(1));
                 }
             })
         })

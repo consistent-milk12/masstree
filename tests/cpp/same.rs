@@ -33,7 +33,7 @@ fn same_single_thread() {
     for x in 0..NUM_KEYS {
         let key = x.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(x + 1));
+        assert_eq!(*val.unwrap(), x + 1);
     }
 }
 
@@ -68,7 +68,7 @@ fn same_concurrent() {
     for x in 0..NUM_KEYS {
         let key = x.to_be_bytes();
         let val = tree.get_with_guard(&key, &guard);
-        assert_eq!(val, Some(x + 1));
+        assert_eq!(*val.unwrap(), x + 1);
     }
 }
 

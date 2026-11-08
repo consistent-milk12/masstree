@@ -51,7 +51,7 @@ fn test_scan_ref_returns_same_values_as_scan() {
         RangeBound::Unbounded,
         RangeBound::Unbounded,
         |_key, value| {
-            values_scan.push(*value);
+            values_scan.push(unsafe { *value.as_ref() });
             true
         },
         &guard,
@@ -93,7 +93,7 @@ fn test_scan_ref_with_range_bounds() {
         RangeBound::Included(b"b"),
         RangeBound::Included(b"d"),
         |_key, value| {
-            values_scan.push(*value);
+            values_scan.push(unsafe { *value.as_ref() });
             true
         },
         &guard,
@@ -294,7 +294,7 @@ fn test_scan_prefix_values_empty_prefix_visits_all() {
     let visited = tree.scan_prefix_values(
         b"",
         |value| {
-            sum += *value;
+            sum += unsafe { *value.as_ref() };
             true
         },
         &guard,
@@ -320,7 +320,7 @@ fn test_scan_prefix_values_all_ff_prefix() {
     let visited = tree.scan_prefix_values(
         b"\xff\xff",
         |value| {
-            values.push(*value);
+            values.push(unsafe { *value.as_ref() });
             true
         },
         &guard,
@@ -374,7 +374,7 @@ fn test_scan_prefix_values_non_aligned_can_over_include_boundary_ikey() {
     let visited = tree.scan_prefix_values(
         b"abc",
         |value| {
-            values.push(*value);
+            values.push(unsafe { *value.as_ref() });
             true
         },
         &guard,
@@ -408,7 +408,7 @@ fn test_scan_prefix_values_exact_8byte_with_layer_includes_exact_first() {
     let visited = tree.scan_prefix_values(
         prefix,
         |value| {
-            values.push(*value);
+            values.push(unsafe { *value.as_ref() });
             true
         },
         &guard,
@@ -442,7 +442,7 @@ fn test_scan_prefix_values_descends_multiple_chunks() {
     let visited = tree.scan_prefix_values(
         &prefix,
         |value| {
-            values.push(*value);
+            values.push(unsafe { *value.as_ref() });
             true
         },
         &guard,
@@ -475,7 +475,7 @@ fn test_scan_prefix_values_descended_remainder_does_not_under_return() {
     let visited = tree.scan_prefix_values(
         prefix,
         |value| {
-            values.push(*value);
+            values.push(unsafe { *value.as_ref() });
             true
         },
         &guard,

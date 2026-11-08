@@ -39,7 +39,7 @@ fn rw2_seed(get_frac: f64) {
             let x = offset.wrapping_add(idx).wrapping_mul(C);
             let key = x.to_be_bytes();
             let val = tree.get_with_guard(&key, &guard);
-            assert_eq!(val, Some(x.wrapping_add(1)));
+            assert_eq!(*val.unwrap(), x.wrapping_add(1));
             gets += 1;
         }
     }
@@ -94,7 +94,7 @@ fn rw2_concurrent() {
                         let x = offset.wrapping_add(idx).wrapping_mul(C);
                         let key = x.to_be_bytes();
                         let val = tree.get_with_guard(&key, &guard);
-                        assert_eq!(val, Some(x.wrapping_add(1)));
+                        assert_eq!(*val.unwrap(), x.wrapping_add(1));
                     }
                 }
             })
