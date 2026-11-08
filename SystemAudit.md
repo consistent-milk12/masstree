@@ -3255,6 +3255,15 @@ contribute to SAFE-03/SAFE-04/SUF-04.
 
 ## 13. Performance opportunities
 
+Implementation follow-up (v1.0.0): PERF-02 rebuilds now size from the complete
+inline + external live set before copying, reserving at least one live set or
+512 bytes of append slack. PERF-01 no longer preallocates a throwaway buffer on
+inserts into a leaf that already has external storage. The strengthened
+`failures/suffix --bin probe` failed before this change (42 allocations / 71,584
+bytes for 20 churn cycles) and passes afterward (6 / 20,560). Value-only updates
+remain allocation-free. The historical table below is retained as baseline
+context; split reservation and raw suffix ownership are separate work items.
+
 The following are measured or mechanically confirmed; none is a correctness
 fix. Values are from the audit host and should be re-measured after correctness
 changes.

@@ -14,6 +14,39 @@
 
 ---
 
+## Implementation order (v1.0.0 worktree)
+
+Execution is ordered by expected performance impact, using the audit's measured
+allocation costs ahead of speculative cache/layout gains. The numbered proposals
+below retain their original identifiers and historical source observations;
+implementation must verify those observations against the current source.
+
+| Order | Work | Evidence / completion gate | Status |
+| --- | --- | --- | --- |
+| 1 | Proposal 3: suffix sizing, split reservation, initialization, raw ownership | Existing suffix probe: 42 allocations / 71,584 bytes for 20 churn cycles; allocation regression + Miri | In progress |
+| 2 | Proposal 4: batch/Extend pipeline, write-through, Entry leaf hints | Batch correctness/ownership tests; allocation and descent measurements | Pending |
+| 3 | Proposal 2: shared traversal, cached promoted roots, opportunistic slot swing | Promoted-layer reads/scans/GC; zero-hop cached root test | Pending |
+| 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Layout assertions, point workloads, Loom and Miri | Pending |
+| 5 | Proposal 5: stack remove routes and remove cleanup | Zero-allocation non-emptying layered removal | Pending |
+| 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, layer contention tests, feature checks | Pending |
+| 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; concurrent reverse scans and Miri | Pending |
+
+Correctness prerequisites take precedence within each change. Proposal 2's
+`LayerAnchor` remains conditional on the profiling trigger in §3.2; PERF-12/13
+are evaluations, not authorization to change WIDTH without evidence. Existing
+fixes (including reverse snapshot validation, sentinel test wiring, dependency
+cleanup, and real tracing) are credited only after source verification.
+Completed within step 1: full-live-set rebuild sizing and eliminating unused
+preallocation reduced the existing churn probe from 42 to 6 allocations and
+71,584 to 20,560 requested bytes (20 cycles). Raw ownership, split reservation,
+and header-only initialization remain open.
+
+Each significant implementation change is committed separately with its tests
+and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user
+work and is kept out of these commits.
+
+---
+
 ## 1. Executive Architectural Assessment
 
 Across `src/` (**101 files, 44,901 total LOC / 25,159 non-test LOC**), the

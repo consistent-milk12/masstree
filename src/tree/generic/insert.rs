@@ -512,6 +512,10 @@ where
 
                 if pre_allocated_vec.is_none()
                     && has_suffix
+                    // Existing external bags usually have append slack. Let
+                    // the cold rebuild size a replacement from the live set
+                    // if needed, instead of allocating a throwaway Vec here.
+                    && !leaf.has_external_ksuf()
                     && matches!(
                         optimistic_search,
                         InsertSearchResultGeneric::NotFound { .. }

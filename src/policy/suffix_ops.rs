@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::ptr as StdPtr;
 use std::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
+use arrayvec::ArrayVec;
 use seize::{Guard, LocalGuard};
 
 use crate::TreePermutation;
@@ -277,9 +278,8 @@ unsafe fn drain_and_rebuild(
     suffix: &[u8],
     perm: &impl TreePermutation,
 ) -> *mut u8 {
-    let new_bag: SuffixBag = inline.drain_to_external(perm, slot, suffix);
-    // SAFETY: Caller holds the leaf lock and external_slot is valid.
-    unsafe { install_drained_bag(new_bag, inline, external_slot, slot, perm) }
+    // SAFETY: The leaf lock keeps both stores stable while we copy active bytes.
+    unsafe { rebuild(inline, external_slot, slot, suffix, perm, None) }
 }
 
 /// Same as [`drain_and_rebuild`] but uses a pre-allocated `Vec<u8>` buffer
@@ -298,39 +298,90 @@ unsafe fn drain_and_rebuild_prealloc(
     perm: &impl TreePermutation,
     prealloc: Vec<u8>,
 ) -> *mut u8 {
-    let new_bag: SuffixBag = inline.drain_to_external_with_vec(perm, slot, suffix, prealloc);
-    // SAFETY: Caller holds the leaf lock and external_slot is valid.
-    unsafe { install_drained_bag(new_bag, inline, external_slot, slot, perm) }
+    // SAFETY: The leaf lock keeps both stores stable while we copy active bytes.
+    unsafe { rebuild(inline, external_slot, slot, suffix, perm, Some(prealloc)) }
 }
 
-/// Merge old external data into the new bag, box it, and install atomically.
-///
-/// Returns the old external pointer (caller retires it after unlock).
+/// Gather both stores before allocating, so merging old external suffixes
+/// cannot consume the append slack reserved for subsequent writes.
 ///
 /// # Safety
 ///
-/// Caller must hold the leaf lock. `external_slot` must be valid.
-#[inline(always)]
-unsafe fn install_drained_bag(
-    mut new_bag: SuffixBag,
+/// Caller holds the leaf lock, which keeps the external cell alive and prevents
+/// concurrent writers. Existing readers only observe the old immutable bytes.
+unsafe fn build_replacement(
+    inline: &InlineSuffixBag,
+    old_external: *mut SuffixBagCell,
+    active_slots: impl Iterator<Item = usize>,
+    slot: usize,
+    suffix: &[u8],
+    buffer: Option<Vec<u8>>,
+) -> SuffixBag {
+    let old_bag = if old_external.is_null() {
+        None
+    } else {
+        // SAFETY: The locked leaf still owns this cell; it is only read here.
+        Some(unsafe { (*old_external).as_ref() })
+    };
+    let mut active: ArrayVec<(usize, &[u8]), 15> = ArrayVec::new();
+    let mut required: usize = suffix.len();
+    for s in active_slots.filter(|&s| s != slot) {
+        if let Some(bytes) = inline.get(s).or_else(|| old_bag.and_then(|bag| bag.get(s))) {
+            required += bytes.len();
+            active.push((s, bytes));
+        }
+    }
+
+    // Also accommodate filling the leaf, but always leave slack beyond the
+    // complete live set, including suffixes that were already external.
+    let full_leaf: usize = 15 * (required / (active.len() + 1));
+    let capacity: usize = (required * 2).max(required + 512).max(full_leaf);
+    let mut bag = match buffer {
+        Some(vec) => {
+            let mut bag = SuffixBag::from_vec(vec);
+            bag.reserve(capacity);
+            bag
+        }
+        None => SuffixBag::with_capacity(capacity),
+    };
+    for (s, bytes) in active {
+        bag.assign(s, bytes);
+    }
+    bag.assign(slot, suffix);
+    bag
+}
+
+/// Rebuild and publish under the leaf lock; the caller retires the old cell.
+///
+/// # Safety
+///
+/// Caller holds the leaf lock and `perm` identifies its active slots.
+unsafe fn rebuild(
     inline: &InlineSuffixBag,
     external_slot: &AtomicPtr<SuffixBagCell>,
     slot: usize,
+    suffix: &[u8],
     perm: &impl TreePermutation,
+    buffer: Option<Vec<u8>>,
 ) -> *mut u8 {
     let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
-    merge_old_external_perm(&mut new_bag, old_external, slot, perm);
-
-    let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
-    let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
+    // SAFETY: The lock keeps the old cell alive and its suffixes stable.
+    let bag = unsafe {
+        build_replacement(
+            inline,
+            old_external,
+            (0..perm.size()).map(|i| perm.get(i)),
+            slot,
+            suffix,
+            buffer,
+        )
+    };
+    let new_ptr = Box::into_raw(Box::new(SuffixBagCell::from_bag(bag)));
     external_slot.store(new_ptr, AtomicOrdering::Release);
 
-    // The drained bag holds the new suffix for `slot`; the inline copy (if the
-    // slot previously held one) was deliberately skipped by `drain_core`.
-    // Clear it so `get_suffix`'s inline-first lookup cannot shadow the new
-    // external value.
+    // Publish before clearing the old inline copy, so readers can always find
+    // the suffix. The replaced slot must not shadow its new external bytes.
     inline.clear(slot);
-
     old_external.cast::<u8>()
 }
 
@@ -348,10 +399,9 @@ unsafe fn drain_and_rebuild_init(
     suffix: &[u8],
     guard: &LocalGuard<'_>,
 ) {
-    let mut new_bag: SuffixBag = inline.drain_to_external_init(slot, suffix);
-
     let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
-    merge_old_external_init(&mut new_bag, old_external, slot);
+    // SAFETY: Initialization owns the unpublished destination exclusively.
+    let new_bag = unsafe { build_replacement(inline, old_external, 0..slot, slot, suffix, None) };
 
     let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
     let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
@@ -367,57 +417,40 @@ unsafe fn drain_and_rebuild_init(
     }
 }
 
-// ============================================================================
-//  Merge Helpers
-// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Merge active suffixes from old external bag into new bag (permutation-based).
-fn merge_old_external_perm(
-    new_bag: &mut SuffixBag,
-    old_external: *mut SuffixBagCell,
-    skip_slot: usize,
-    perm: &impl TreePermutation,
-) {
-    if old_external.is_null() {
-        return;
-    }
-
-    // SAFETY: old_external is valid, caller holds the lock. The old cell is
-    // about to be retired, so no concurrent writers. Readers may still hold
-    // shared references, but we only read from old_ref here.
-    let old_ref: &SuffixBag = unsafe { (*old_external).as_ref() };
-
-    let size: usize = perm.size();
-
-    for i in 0..size {
-        let phys: usize = perm.get(i);
-
-        if phys == skip_slot {
-            continue;
+    #[test]
+    fn rebuild_sizes_the_complete_live_set_and_preserves_precedence() {
+        let mut old = SuffixBag::with_capacity(3_000);
+        for slot in 0..15 {
+            old.assign(slot, &[1; 200]);
         }
-
-        if !new_bag.has_suffix(phys)
-            && let Some(s) = old_ref.get(phys)
-        {
-            new_bag.assign(phys, s);
-        }
-    }
-}
-
-/// Merge active suffixes from old external bag into new bag (sequential init).
-fn merge_old_external_init(new_bag: &mut SuffixBag, old_external: *mut SuffixBagCell, slot: usize) {
-    if old_external.is_null() {
-        return;
-    }
-
-    // SAFETY: old_external is valid, caller holds the lock.
-    let old_ref: &SuffixBag = unsafe { (*old_external).as_ref() };
-
-    for s in 0..slot {
-        if !new_bag.has_suffix(s)
-            && let Some(ext_suffix) = old_ref.get(s)
-        {
-            new_bag.assign(s, ext_suffix);
+        let old = SuffixBagCell::from_bag(old);
+        let inline = InlineSuffixBag::new();
+        assert!(inline.try_assign(0, &[2; 200]));
+        for buffer in [None, Some(Vec::with_capacity(128))] {
+            // SAFETY: The stack-owned cell stays alive and has no concurrent
+            // writers. Rebuilding only reads its immutable suffix bytes.
+            let bag = unsafe {
+                build_replacement(
+                    &inline,
+                    StdPtr::from_ref(&old).cast_mut(),
+                    0..14,
+                    13,
+                    &[3; 248],
+                    buffer,
+                )
+            };
+            assert_eq!(bag.get(0), Some([2; 200].as_slice()));
+            for slot in 1..13 {
+                assert_eq!(bag.get(slot), Some([1; 200].as_slice()));
+            }
+            assert_eq!(bag.get(13), Some([3; 248].as_slice()));
+            assert_eq!(bag.get(14), None, "inactive external slot was copied");
+            assert_eq!(bag.used(), 13 * 200 + 248);
+            assert!(bag.capacity() >= bag.used() * 2);
         }
     }
 }

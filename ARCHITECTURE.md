@@ -866,6 +866,11 @@ allocation) in exchange for a much smaller leaf (448 B or 576 B instead of 1152 
 `src/policy/suffix_ops.rs` contains the shared algorithms used by both stores: inline lookup,
 external pointer publication, append-only assignment, drain-and-rebuild, merging the old external
 bag's live suffixes using the permutation, and EBR retirement of replaced cells.
+Rebuilds gather the full live set from both stores before allocating, preferring
+inline data when both stores contain a slot. Capacity includes at least 512 bytes
+or one full live set of append slack. Inserts into leaves with existing external
+storage skip speculative suffix-buffer allocation; a necessary rebuild sizes its
+buffer on the cold path.
 
 ### 6.5 Split migration and feature effects
 

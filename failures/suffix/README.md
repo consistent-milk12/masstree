@@ -1,19 +1,20 @@
-# Suffix allocation/reproduction probe
+# Suffix allocation regression probe
 
-`src/main.rs` counts global allocations for two workloads:
+`src/main.rs` counts global allocations for two workloads and asserts that
+suffix storage remains amortized. It also checks every surviving value and len.
 
-1. **PERF-SUF-01** — 13 keys with 40-byte suffixes in one leaf, then 260 value
-   updates. Expected: ~1 allocation and ~600 bytes per update even though only
-   the value changes.
-2. **PERF-SUF-02** — 15 keys with 200-byte suffixes in a full leaf, then 20
-   remove+reinsert cycles. Expected: ~2 allocations and ~3.5 KB per cycle from
-   drain-and-rebuild.
+1. **PERF-01** — 13 keys with 40-byte suffixes, then 260 value updates:
+   zero allocations (already fixed before this series).
+2. **PERF-02** — 15 keys with 200-byte suffixes, then 20 remove/reinsert cycles:
+   baseline 42 allocations / 71,584 bytes; after sizing rebuilds from the complete
+   live set and skipping throwaway preallocation, 6 allocations / 20,560 bytes.
+   The bound allows EBR bookkeeping while rejecting per-operation rebuilding.
 
 ```bash
-cd failures/suffix
-cargo run --quiet
+CARGO_TARGET_DIR=/tmp/masstree-target cargo run --quiet --manifest-path failures/suffix/Cargo.toml --bin probe
 ```
 
-The suffix functional failures in SUF-01…SUF-05 (plus SAFE-06 for the external-bag race) are small public-API snippets
-documented in `SystemAudit.md`; the allocation measurements here are the
-runtime evidence.
+The probe failed at the allocation bound before the fix. Allocation counts are
+from the system allocator, default suffix capacity, and the inline-value policy;
+they are not throughput measurements. `compact_empty` remains a separate SUF-02
+regression. Run each failure-corpus binary in its own process.
