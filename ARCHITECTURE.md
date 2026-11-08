@@ -1326,11 +1326,14 @@ happens later in coalesce.
 Deduplication uses the leaf's queued bit (`try_mark_queued`). `schedule_chain` is used when the
 route is empty (top-level leaf); `schedule_sublayer` when the leaf is inside a layer.
 
-Processing (`Coalesce::process_all` / `process_batch`) drains deferred sublayers, then repeatedly:
+Processing (`Coalesce::process_all` / `process_batch`) starts by draining **both** deferred queues
+into their main queues, then repeatedly:
 
-1. one deferred chain entry (oldest, re-traverse from root);
-2. one sublayer entry (dead sublayer trees consume memory and serve no lookups);
-3. one immediate chain entry (pointer-based).
+1. one sublayer entry (dead sublayer trees consume memory and serve no lookups);
+2. one chain entry (re-traverse from root).
+
+`process_all` limits a call to one attempt per entry that was present at entry, so a failed entry
+cannot burn its retry budget in a single call. `process_batch` uses its explicit limit.
 
 **Chain processing:**
 
@@ -1362,7 +1365,8 @@ attempt per maintenance call. Chain deferred entries store only `ikey_bound` and
 the root, avoiding cross-call pointer lifetime issues. Requeue exhaustion leaves the queued bit set;
 it is cleared when the leaf is reused (`clear_empty_state`) or when the tree is dropped.
 
-`maintenance(&mut guard)` performs `guard.flush()`, `guard.refresh()`, and `process_all`. The tree
+`maintenance(&mut guard)` runs `process_all` and then `guard.flush()` + `guard.refresh()`, so nodes
+retired by coalescing are reclaimed in the same call. The tree
 also exposes `process_coalesce`, `process_coalesce_batch`, `pending_coalesce`,
 `coalesce_deferred`, and `coalesce_abandoned` for diagnostics and manual maintenance.
 
@@ -1414,9 +1418,16 @@ Reverse: Emit | FindPrev | Down | Up | Retry
 - `Emit`: emit a slot.
 
 Flags (`iter_flags.rs`) pack `EXHAUSTED`, `INITIALIZED`, `EMIT_EQUAL`, `NEEDS_DUPLICATE_CHECK`,
-`SINGLE_LAYER_MODE` (forward), and `UPPER_BOUND` (reverse). `single_layer_mode` is enabled when the
-start key and any bounded end key are at most 8 bytes (an unbounded end is always compatible); a
-sublayer descent disables it.
+`CURSOR_EMITTED`, `SINGLE_LAYER_MODE` (forward), `UPPER_BOUND` (reverse), and a pending descent
+mode (`DOWN_FOLLOW_SUFFIX` / `DOWN_FRESH_SUBTREE`). `single_layer_mode` is enabled when the start
+key and any bounded end key are at most 8 bytes (an unbounded end is always compatible); a sublayer
+descent disables it.
+
+`CURSOR_EMITTED` records whether the cursor holds a key this scan already emitted. It lets a retry
+use a strict lower/upper bound so it cannot re-emit that key. `DOWN_FOLLOW_SUFFIX` means a pending
+sublayer descent shares the cursor's 8-byte prefix, so the real suffix must be carried into the
+sublayer; `DOWN_FRESH_SUBTREE` means the layer has a different prefix, so every key in it is beyond
+the last emitted key and the dedup state is cleared.
 
 #### Forward algorithm
 
@@ -1430,9 +1441,16 @@ deduplicates against the cursor, and either descends a layer or emits. When the 
 `advance_leaf_generic` follows `next`; a marked pointer waits for the split, a null pointer ascends,
 and a deleted leaf is retried. `find_retry` re-descends from the current layer root.
 
+Slot reads follow a snapshot/validate/commit protocol: read the ikey, keylenx, suffix, and value
+(or layer pointer) first; validate the cached leaf version; only then write the cursor, push the
+layer stack, or publish a snapshot. `find_initial` performs its position search and initial
+emission in a scratch `CursorKey`, so a failed validation cannot overwrite the start bound.
+
 `find_initial`/`find_next` are wrapped by `ForwardScanCtx::advance`, which drives the state machine
-and handles `Down`/`Up` transitions. `handle_down` shifts the cursor and resets `last_ikey`;
-`handle_up` pops the layer and repositions in the parent with `lower_with_suffix`.
+and handles `Down`/`Up` transitions. `handle_down` consumes the recorded descent mode: a
+same-prefix real suffix is carried into the sublayer with `shift()`; otherwise the cursor moves to
+the sublayer minimum with `shift_clear()`, clearing the dedup state only for a different prefix.
+`handle_up` pops the layer and repositions in the parent after the layer pointer.
 
 #### Reverse algorithm
 
@@ -1441,7 +1459,11 @@ Reverse starts from the end bound (`ReverseScanCtx::new_with_bound`) using
 a leaf, uses `stable_reverse` to follow `next` while the cursor is at/after the next leaf's bound
 (handling keys moved right by splits), then `lower_reverse` picks the slot at or before the bound.
 Layer pointers descend; suffix keys compare stored suffix bytes; inline keys emit only when
-`emit_equal || upper_bound`.
+`emit_equal || upper_bound`. Slot payloads are read before validation, and the cursor, flags, and
+stack are committed only after `has_changed(version)` succeeds. Reverse descent follows a
+same-prefix suffix with `shift()`; a different prefix starts the sublayer at its maximum with
+`shift_clear_reverse()`. A retry uses a strict upper bound when the cursor already holds an emitted
+key, so it is not re-emitted.
 
 `find_prev_generic` walks slots downward, enforces non-increasing ikeys, and descends layers.
 `advance_to_prev_leaf_generic` follows `prev` and starts at `size-1`. `reposition_back_generic`
