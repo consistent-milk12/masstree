@@ -196,7 +196,9 @@ where
         let allocated: usize = perm.insert_from_back(logical_pos);
         debug_assert_eq!(allocated, slot, "allocated unexpected slot");
 
-        leaf.set_permutation_relaxed(perm);
+        // Publish the new logical ordering with Release. Readers outside the
+        // lock use this as the slot-publication point.
+        leaf.set_permutation(perm);
 
         deferred_retire
     }
@@ -265,7 +267,7 @@ where
             self.assign_slot_generic(leaf, lock, slot, key, value, guard, pre_allocated);
 
         let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
-        leaf.set_permutation_relaxed(new_perm);
+        leaf.set_permutation(new_perm);
 
         (Ok(None), deferred_retire)
     }

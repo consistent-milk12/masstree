@@ -850,8 +850,14 @@ where
 
         let ikey: u64 = key.ikey();
 
+        // OCC-01: every new-slot write marks the node dirty unconditionally.
+        // The previous modstate-conditional form took the normal (INSERT)
+        // state for granted and published a new permutation with no version
+        // change, so a reader that snapshotted before the insert could not
+        // detect it. `mark_insert` is idempotent.
+        lock.mark_insert();
+
         if leaf.modstate_relaxed() != MODSTATE_INSERT {
-            lock.mark_insert();
             leaf.set_modstate_relaxed(MODSTATE_INSERT);
         }
 

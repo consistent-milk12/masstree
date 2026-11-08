@@ -1032,7 +1032,7 @@ where
             self.assign_slot_generic(leaf, lock, slot, key, value, guard, None);
 
         let new_perm: Permuter = <LeafNode15<P> as TreeLeafNode<P>>::Perm::make_sorted(1);
-        leaf.set_permutation_relaxed(new_perm);
+        leaf.set_permutation(new_perm);
         self.count.increment();
 
         deferred_retire
