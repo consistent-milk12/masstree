@@ -429,32 +429,41 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             return EmitResult::NoMatch;
         }
 
-        // Version check before read
-        if leaf.version().has_changed(version) {
-            return EmitResult::VersionChanged;
-        }
-
-        let Some(output) = leaf.load_value(slot) else {
-            // Concurrent modification removed value between is_value_empty check and load
-            return EmitResult::NoMatch;
+        // Snapshot the suffix and value first; commit the cursor only after
+        // the OCC validation below. Reading after validation and then writing
+        // the cursor would expose a slot that a writer may have reused.
+        let suffix: Option<&[u8]> = if keylenx == KSUF_KEYLENX {
+            leaf.ksuf(slot)
+        } else {
+            None
         };
 
         let key_len: usize = if keylenx == KSUF_KEYLENX {
-            match leaf.ksuf(slot) {
-                Some(suffix) => IKEY_SIZE + suffix.len(),
-                None => IKEY_SIZE,
-            }
+            suffix.map_or(IKEY_SIZE, |s| IKEY_SIZE + s.len())
         } else {
             #[expect(clippy::cast_possible_truncation, reason = "Known const")]
             let len: usize = std::cmp::min(keylenx, IKEY_SIZE as u8) as usize;
             len
         };
 
+        let Some(output) = leaf.load_value(slot) else {
+            // Concurrent modification removed value between the empty check
+            // and the load; retry if the snapshot is stale.
+            if leaf.version().has_changed(version) {
+                return EmitResult::VersionChanged;
+            }
+
+            return EmitResult::NoMatch;
+        };
+
+        // Validate after the complete payload/suffix read.
+        if leaf.version().has_changed(version) {
+            return EmitResult::VersionChanged;
+        }
+
         cursor_key.assign_store_ikey(slot_ikey);
 
-        if keylenx == KSUF_KEYLENX
-            && let Some(suffix) = leaf.ksuf(slot)
-        {
+        if let Some(suffix) = suffix {
             let _ = cursor_key.assign_store_suffix(suffix);
         }
 
@@ -657,6 +666,15 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
         ki: isize,
     ) -> (ScanStateBack, Option<E::Snapshot>) {
+        // Load the layer pointer first and validate before pushing the parent
+        // context or mutating the cursor: the slot may have been converted
+        // back to a value by a concurrent update.
+        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+
+        if leaf.version().has_changed(version) {
+            return (ScanStateBack::Retry, None);
+        }
+
         // Push current context to layer stack for return
         self.layer_stack
             .push(LayerContext::new(self.stack.get_root(), leaf_ptr));
@@ -665,7 +683,6 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         self.cursor_key.assign_store_ikey(slot_ikey);
 
         // Get layer root and prefetch
-        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
         prefetch_read(layer_ptr);
 
         // Update stack for sublayer (ki-1 for when we return)
@@ -695,46 +712,56 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     ) -> (ScanStateBack, Option<E::Snapshot>) {
         leaf.prefetch_value(slot);
 
-        // Get value pointer first (before version check to pipeline loads)
         if leaf.is_value_empty_relaxed(slot) {
-            // Empty value slot - skip to previous slot
+            if leaf.version().has_changed(version) {
+                return (ScanStateBack::Retry, None);
+            }
+
             self.stack.set_ki(ReverseScanHelper::prev(ki));
             return (ScanStateBack::FindPrev, None);
         }
 
-        // Version check BEFORE reading value
-        if leaf.version().has_changed(version) {
-            return (ScanStateBack::Retry, None);
-        }
+        // Snapshot suffix and value first; commit the cursor only after OCC
+        // validation. A writer may have reused this slot in the meantime.
+        let suffix: Option<&[u8]> = if keylenx == KSUF_KEYLENX {
+            leaf.ksuf(slot)
+        } else {
+            None
+        };
 
-        // Build key from slot data
-        self.cursor_key.assign_store_ikey(slot_ikey);
-
-        // CRITICAL: Clear upper_bound after successful emission
-        self.flags.clear_upper_bound();
-
-        // Calculate key length and handle suffix
         let key_len: usize = if keylenx == KSUF_KEYLENX {
-            leaf.ksuf(slot).map_or(IKEY_SIZE, |suffix| {
-                self.cursor_key.assign_store_suffix(suffix);
-                IKEY_SIZE + suffix.len()
-            })
+            suffix.map_or(IKEY_SIZE, |s| IKEY_SIZE + s.len())
         } else {
             #[expect(clippy::cast_possible_truncation, reason = "Known const")]
             let len: usize = std::cmp::min(keylenx, IKEY_SIZE as u8) as usize;
             len
         };
 
-        self.cursor_key.assign_store_length(key_len);
-
-        // Emit value via trait — CloneEmitter calls load_value, PtrEmitter calls load_value_raw
         let Some(snapshot) = E::emit_value(leaf, slot, key_len) else {
-            // Concurrent modification removed value between is_value_empty check and load
+            if leaf.version().has_changed(version) {
+                return (ScanStateBack::Retry, None);
+            }
+
             self.stack.set_ki(ReverseScanHelper::prev(ki));
             return (ScanStateBack::FindPrev, None);
         };
 
-        // The cursor now holds this emitted key.
+        // Validate after the complete payload read and before publishing the
+        // key/cursor.
+        if leaf.version().has_changed(version) {
+            return (ScanStateBack::Retry, None);
+        }
+
+        self.cursor_key.assign_store_ikey(slot_ikey);
+
+        if let Some(suffix) = suffix {
+            let _ = self.cursor_key.assign_store_suffix(suffix);
+        }
+
+        self.cursor_key.assign_store_length(key_len);
+
+        // CRITICAL: Clear upper_bound after successful emission.
+        self.flags.clear_upper_bound();
         self.flags.mark_cursor_emitted();
 
         // Update cached ikey for monotonicity check
@@ -1151,15 +1178,33 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             return (ScanStateBack::Down, None);
         }
 
-        // Value slot - prepare for emit
+        // Value slot - snapshot before validation, commit cursor after.
         leaf.prefetch_value(slot);
+
         if leaf.is_value_empty_relaxed(slot) {
+            if leaf.version().has_changed(version) {
+                return (ScanStateBack::Retry, None);
+            }
+
             self.stack.set_ki(ki - 1);
             return (ScanStateBack::FindPrev, None);
         }
 
-        // Inline keys have keylenx 0-8 representing the actual length
+        // Inline keys have keylenx 0-8 representing the actual length.
         let key_len: usize = slot_keylenx as usize;
+        let Some(output) = leaf.load_value(slot) else {
+            if leaf.version().has_changed(version) {
+                return (ScanStateBack::Retry, None);
+            }
+
+            return (ScanStateBack::FindPrev, None);
+        };
+
+        // Validate after the complete value read.
+        if leaf.version().has_changed(version) {
+            return (ScanStateBack::Retry, None);
+        }
+
         self.cursor_key.assign_store_ikey(slot_ikey);
         self.cursor_key.assign_store_length(key_len);
         self.cursor_key.mark_key_complete();
@@ -1175,10 +1220,6 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
         // Advance position for next call (go backwards)
         self.stack.set_ki(ki - 1);
-
-        let Some(output) = leaf.load_value(slot) else {
-            return (ScanStateBack::FindPrev, None);
-        };
 
         (
             ScanStateBack::Emit,
@@ -1386,60 +1427,12 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     /// Returns `true` if successfully advanced, `false` if layer exhausted.
     #[inline]
     pub(crate) fn advance_prev_leaf(&mut self, guard: &LocalGuard<'_>) -> bool {
-        let current_ptr: *mut LeafNode15<P> = self.stack.get_leaf_ptr();
-        if current_ptr.is_null() {
-            return false;
-        }
-
-        // SAFETY: current_ptr was validated
-        let current_leaf: &LeafNode15<P> = unsafe { &*current_ptr };
-
-        // Update cursor key with current leaf's ikey_bound
-        let ikey_bound: u64 = current_leaf.ikey_bound();
-        self.cursor_key.assign_store_ikey(ikey_bound);
-        self.cursor_key.assign_store_length(0);
-
-        // Get previous leaf pointer
-        let prev_ptr: *mut LeafNode15<P> = ReverseScanHelper::retreat(current_leaf);
-
-        if prev_ptr.is_null() {
-            self.stack.set_leaf(StdPtr::null_mut());
-            return false;
-        }
-
-        // Prefetch previous leaf
-        prefetch_read(prev_ptr.cast::<u8>());
-
-        // Set up stack with new leaf
-        self.stack.set_leaf(prev_ptr);
-
-        // Get stable version (may follow forward chain)
-        let mut leaf_ptr: *mut LeafNode15<P> = prev_ptr;
-        let version: u32 =
-            ReverseScanHelper::stable_reverse(&mut leaf_ptr, &self.cursor_key, guard);
-
-        if leaf_ptr != prev_ptr {
-            self.stack.set_leaf(leaf_ptr);
-        }
-
-        // Prefetch the prev-prev leaf for pipelining
-        let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-        let prev_prev: *mut LeafNode15<P> = leaf.prev(guard);
-        if !prev_prev.is_null() {
-            prefetch_read(prev_prev.cast::<u8>());
-        }
-
-        let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
-        let size: usize = perm.size();
-
-        let ki: isize = if size > 0 {
-            (size - 1).cast_signed()
-        } else {
-            -1
-        };
-
-        self.stack.update_state(version, perm, ki);
-        true
+        // Reuse the guarded retreat loop: it uses the protected `prev` load,
+        // follows split siblings that appeared below the current bound, and
+        // skips empty/deleted intermediate leaves. The returned snapshot is
+        // never populated by a retreat.
+        let (state, _) = self.advance_to_prev_leaf_generic::<PtrEmitter>(guard);
+        matches!(state, ScanStateBack::FindPrev)
     }
 }
 

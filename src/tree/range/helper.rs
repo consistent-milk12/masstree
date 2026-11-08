@@ -276,21 +276,6 @@ impl ReverseScanHelper {
         ki - 1
     }
 
-    /// Retreat to the previous leaf in the B-link chain.
-    ///
-    /// # Safety
-    /// The returned pointer is only valid while the guard is held and
-    /// version validation has not failed.
-    #[inline(always)]
-    pub fn retreat<P>(leaf: &LeafNode15<P>) -> *mut LeafNode15<P>
-    where
-        P: LeafPolicy,
-    {
-        // SAFETY: Leaf pointer is valid, called during OCC read where
-        // version validation catches concurrent modifications.
-        unsafe { leaf.prev_unguarded() }
-    }
-
     pub fn stable_reverse<P>(
         leaf: &mut *mut LeafNode15<P>,
         cursor_key: &CursorKey,

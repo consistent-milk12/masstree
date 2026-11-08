@@ -250,9 +250,14 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
         let size: usize = perm.size();
 
+        // Position calculations and initial emission write into a scratch
+        // cursor. Strictly, `self.cursor_key` must still hold the start bound
+        // if validation fails and the caller retries.
+        let mut probe: CursorKey = self.cursor_key.clone();
+
         // Full-key lower bound: an equal-ikey group can contain several
         // distinct keys (zero-padded terminals and longer suffix variants).
-        let pos: usize = lower_bound_full(&self.cursor_key, leaf, &perm, false);
+        let pos: usize = lower_bound_full(&probe, leaf, &perm, false);
         let mut final_pos: usize = pos;
         let mut emitted: bool = false;
 
@@ -261,7 +266,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         } else {
             let slot: usize = perm.get(pos);
             let keylenx: u8 = leaf.keylenx_relaxed(slot);
-            let cmp: Ordering = compare_cursor_to_slot(&self.cursor_key, leaf, slot);
+            let cmp: Ordering = compare_cursor_to_slot(&probe, leaf, slot);
 
             if cmp == Ordering::Greater {
                 // Defensive: the lower-bound search cannot land after the cursor.
@@ -269,11 +274,15 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 (ScanState::FindNext, None)
             } else if keylenx >= LAYER_KEYLENX {
                 // The first key at or after the cursor lives in this layer.
-                // The iterator shifts the cursor (following the user's suffix
-                // when present, otherwise to the sublayer minimum) on `Down`.
+                // Load the pointer first and validate before publishing it.
                 let slot_ikey: u64 = leaf.ikey_relaxed(slot);
                 let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-                self.cursor_key.assign_store_ikey(slot_ikey);
+
+                if leaf.version().has_changed(version) {
+                    return (ScanState::Retry, None);
+                }
+
+                probe.assign_store_ikey(slot_ikey);
                 prefetch_read(layer_ptr);
                 self.stack.set_root(layer_ptr);
                 final_pos = pos + 1;
@@ -282,8 +291,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
                 final_pos = pos + 1;
 
                 if emit_equal {
-                    let snapshot =
-                        Self::emit_initial_slot(leaf, slot, keylenx, &mut self.cursor_key);
+                    let snapshot = Self::emit_initial_slot(leaf, slot, keylenx, &mut probe);
                     emitted = snapshot.is_some();
 
                     (
@@ -313,6 +321,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             self.flags.clear_cursor_emitted();
         }
 
+        self.cursor_key = probe;
         self.stack.update_state(version, perm, final_pos);
 
         (next_state, snapshot)
@@ -459,6 +468,13 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         if slot_keylenx >= LAYER_KEYLENX {
             let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+
+            // Validate before mutating the stack/cursor: the slot may have
+            // been converted back to a value by a concurrent update.
+            if leaf.version().has_changed(self.stack.version()) {
+                return (ScanState::Retry, None);
+            }
+
             self.layer_stack
                 .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
             self.cursor_key.assign_store_ikey(slot_ikey);
@@ -468,17 +484,24 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::Down, None);
         }
 
+        // Snapshot the suffix once; do not re-read it after validation.
+        let suffix: Option<&[u8]> = if slot_keylenx == KSUF_KEYLENX {
+            leaf.ksuf(slot)
+        } else {
+            None
+        };
+
         let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
-            if let Some(suffix) = leaf.ksuf(slot) {
-                IKEY_SIZE + suffix.len()
-            } else {
-                IKEY_SIZE
-            }
+            suffix.map_or(IKEY_SIZE, |s| IKEY_SIZE + s.len())
         } else {
             slot_keylenx as usize
         };
 
         let Some(snapshot) = E::emit_value(leaf, slot, key_len) else {
+            if leaf.version().has_changed(self.stack.version()) {
+                return (ScanState::Retry, None);
+            }
+
             self.stack.next();
             return (ScanState::FindNext, None);
         };
@@ -492,9 +515,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         self.cursor_key.assign_store_ikey(slot_ikey);
 
-        if slot_keylenx == KSUF_KEYLENX
-            && let Some(suffix) = leaf.ksuf(slot)
-        {
+        if let Some(suffix) = suffix {
             let _ = self.cursor_key.assign_store_suffix(suffix);
         }
 
@@ -567,8 +588,13 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         // True layer pointer — prepare for descent
         if slot_keylenx >= LAYER_KEYLENX {
-            self.cursor_key.assign_store_ikey(slot_ikey);
             let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+
+            if leaf.version().has_changed(version) {
+                return (ScanState::Retry, None);
+            }
+
+            self.cursor_key.assign_store_ikey(slot_ikey);
             prefetch_read(layer_ptr);
             return (ScanState::Down, None);
         }
