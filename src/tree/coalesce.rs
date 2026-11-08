@@ -231,11 +231,17 @@ impl Coalesce {
         P: LeafPolicy,
         A: TreeAllocator<P>,
     {
-        tree.coalesce_queue().drain_deferred();
+        let queue: &CoalesceQueue = tree.coalesce_queue();
+        queue.drain_deferred();
 
+        // GC-05: one attempt per entry that was present when this call began.
+        // A failed entry is requeued to a deferred queue; without this budget
+        // `process_all` would immediately pop it again and consume its entire
+        // retry allowance in a single call.
+        let budget: usize = queue.len();
         let mut processed: usize = 0;
 
-        while Self::try_remove_one::<P, A>(tree, guard) {
+        while processed < budget && Self::try_remove_one::<P, A>(tree, guard) {
             processed += 1;
         }
 
