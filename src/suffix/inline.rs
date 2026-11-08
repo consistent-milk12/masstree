@@ -251,7 +251,7 @@ impl InlineSuffixBag {
         } else {
             new_suffix.len()
         };
-        let headroom: usize = (WIDTH - (copy_count + 1)) * avg_suffix;
+        let headroom: usize = WIDTH.saturating_sub(copy_count + 1) * avg_suffix;
         let target_capacity: usize = required_capacity + headroom;
 
         let mut external: SuffixBag = match buffer {
