@@ -50,7 +50,7 @@ fn valid_key_nonempty() -> impl Strategy<Value = Vec<u8>> {
 
 /// Strategy for generating a sequence of unique short keys.
 fn unique_keys(max_count: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
-    prop::collection::hash_set(short_key_nonempty(), 0..=max_count)
+    prop::collection::btree_set(short_key_nonempty(), 0..=max_count)
         .prop_map(|set| set.into_iter().collect())
 }
 
@@ -101,7 +101,8 @@ fn very_long_key() -> impl Strategy<Value = Vec<u8>> {
 
 /// Strategy for generating unique long keys.
 fn unique_long_keys(max_count: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
-    prop::collection::hash_set(long_key(), 0..=max_count).prop_map(|set| set.into_iter().collect())
+    prop::collection::btree_set(long_key(), 0..=max_count)
+        .prop_map(|set| set.into_iter().collect())
 }
 
 // ============================================================================
@@ -783,10 +784,18 @@ proptest! {
             &guard,
         );
 
-        // Verify all keys are in range
-        for (key, _) in &scanned {
+        // Exact completeness, not just an in-range filter.
+        let expected: Vec<Vec<u8>> = (count / 4..count * 3 / 4)
+            .map(|i| format!("{i:04}").into_bytes())
+            .collect();
+        let scanned_keys: Vec<Vec<u8>> = scanned.iter().map(|(key, _)| key.clone()).collect();
+        prop_assert_eq!(scanned_keys, expected);
+
+        for (key, value) in &scanned {
             prop_assert!(key.as_slice() >= start.as_bytes());
             prop_assert!(key.as_slice() < end.as_bytes());
+            let parsed: usize = String::from_utf8_lossy(key).parse().unwrap();
+            prop_assert_eq!(*value, parsed as u64);
         }
     }
 
@@ -797,6 +806,7 @@ proptest! {
         suffixes in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..4), 5..20)
     ) {
         let tree: MassTree15<u64> = MassTree15::new();
+        let mut oracle: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
 
         // Insert keys with prefix
         for (i, suffix) in suffixes.iter().enumerate() {
@@ -804,12 +814,14 @@ proptest! {
             key.extend(suffix);
             key.truncate(SHORT_KEY_LEN);
             tree.insert(&key, i as u64);
+            oracle.insert(key, i as u64);
         }
 
         // Insert some keys without prefix
         for i in 0..5 {
             let key = vec![0xFF, i as u8]; // Different prefix
             tree.insert(&key, 100 + i as u64);
+            oracle.insert(key, 100 + i as u64);
         }
 
         let guard = tree.guard();
@@ -820,14 +832,13 @@ proptest! {
             true
         }, &guard);
 
-        // All scanned keys should have the prefix
-        for key in &scanned {
-            prop_assert!(
-                key.starts_with(&prefix),
-                "Key {:?} doesn't start with prefix {:?}",
-                key, prefix
-            );
-        }
+        let expected: Vec<Vec<u8>> = oracle
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect();
+
+        prop_assert_eq!(scanned, expected);
     }
 
     /// Early termination in scan should work.
@@ -1571,7 +1582,7 @@ proptest! {
 
 /// Unique keys of any length (1-64 bytes).
 fn unique_any_keys(max_count: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
-    prop::collection::hash_set(prop::collection::vec(any::<u8>(), 1..=64), 1..=max_count)
+    prop::collection::btree_set(prop::collection::vec(any::<u8>(), 1..=64), 1..=max_count)
         .prop_map(|set| set.into_iter().collect())
 }
 

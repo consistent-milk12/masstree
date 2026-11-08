@@ -16,12 +16,13 @@
 //!
 //! Environment variables:
 //! - `RUST_LOG`: Filter directives (e.g., `masstree=debug,masstree::tree::locked=trace`)
-//! - `MASSTREE_LOG_DIR`: Log directory (default: `logs/`)
-//! - `MASSTREE_LOG_CONSOLE`: Set to "0" to disable console output
+//! - `MASSTREE_LOG_DIR`: Log directory (default: the system temp directory)
+//! - `MASSTREE_LOG_CONSOLE`: Set to "1" to enable console output (default: off)
 //!
 //! # Log Files
 //!
-//! Logs are written to `logs/masstree.jsonl` as newline-delimited JSON (NDJSON).
+//! Logs are written to `$TMPDIR/masstree-logs/masstree.jsonl` by default, so a
+//! test run never writes into the repository.
 //! Use `jq` for pretty-printing and filtering:
 //!
 //! ```bash
@@ -80,9 +81,9 @@ pub struct TracingConfig {
 impl Default for TracingConfig {
     fn default() -> Self {
         Self {
-            log_dir: PathBuf::from("logs"),
+            log_dir: env::temp_dir().join("masstree-logs"),
             log_file: "masstree.jsonl".to_string(),
-            console_enabled: true,
+            console_enabled: false,
             default_level: Level::INFO,
         }
     }
@@ -97,8 +98,8 @@ impl TracingConfig {
             config.log_dir = PathBuf::from(dir);
         }
 
-        if env::var("MASSTREE_LOG_CONSOLE").is_ok_and(|v| v == "0") {
-            config.console_enabled = false;
+        if let Ok(value) = env::var("MASSTREE_LOG_CONSOLE") {
+            config.console_enabled = value != "0";
         }
 
         config
