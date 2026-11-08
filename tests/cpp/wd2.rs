@@ -180,4 +180,10 @@ fn wd2_simple() {
 
     writer.join().unwrap();
     deleter.join().unwrap();
+
+    // The tree must remain usable after concurrent insert/remove churn.
+    let guard = tree.guard();
+    let sentinel: &[u8] = b"__wd2_sentinel__";
+    tree.insert_with_guard(sentinel, 11, &guard);
+    assert_eq!(*tree.get_with_guard(sentinel, &guard).unwrap(), 11);
 }

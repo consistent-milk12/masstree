@@ -162,6 +162,13 @@ fn splitremove_random() {
     for h in handles {
         h.join().unwrap();
     }
+
+    // The tree must remain usable after split/remove churn.
+    let guard = tree.guard();
+    let sentinel: &[u8] = b"__splitremove_sentinel__";
+    tree.insert_with_guard(sentinel, 7, &guard);
+    assert_eq!(*tree.get_with_guard(sentinel, &guard).unwrap(), 7);
+    let _ = tree.remove_with_guard(sentinel, &guard);
 }
 
 #[test]

@@ -45,7 +45,13 @@ fn uscale_single_thread() {
         let x = keys[idx];
         let key = x.to_be_bytes();
         let new_val: u64 = rng.random();
-        let _ = tree.insert_with_guard(&key, new_val, &guard);
+        tree.insert_with_guard(&key, new_val, &guard);
+    }
+
+    // Updates never remove a key; every populated key must still be present.
+    assert_eq!(tree.len(), keys.len());
+    for &x in &keys {
+        assert!(tree.get_with_guard(&x.to_be_bytes(), &guard).is_some());
     }
 }
 
@@ -92,5 +98,11 @@ fn uscale_threads(num_threads: usize) {
 
     for h in handles {
         h.join().unwrap();
+    }
+
+    let guard = tree.guard();
+    assert_eq!(tree.len(), keys.len());
+    for &x in keys.iter() {
+        assert!(tree.get_with_guard(&x.to_be_bytes(), &guard).is_some());
     }
 }

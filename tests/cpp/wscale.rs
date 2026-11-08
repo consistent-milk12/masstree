@@ -22,10 +22,21 @@ fn wscale_single_thread() {
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(SEED);
 
-    for _ in 0..N {
+    let mut sample: Vec<[u8; 8]> = Vec::new();
+
+    for n in 0..N {
         let x: u64 = rng.random();
         let key = x.to_be_bytes();
-        let _ = tree.insert_with_guard(&key, x + 1, &guard);
+        tree.insert_with_guard(&key, x + 1, &guard);
+
+        if n % 1000 == 0 {
+            sample.push(key);
+        }
+    }
+
+    assert!(tree.len() > 0);
+    for key in sample {
+        assert!(tree.get_with_guard(&key, &guard).is_some());
     }
 }
 
@@ -67,4 +78,15 @@ fn wscale_threads(num_threads: usize) {
     for h in handles {
         h.join().unwrap();
     }
+
+    assert!(tree.len() > 0);
+    let guard = tree.guard();
+    let sentinel: u64 = u64::MAX;
+    tree.insert_with_guard(&sentinel.to_be_bytes(), 1, &guard);
+    assert_eq!(
+        *tree
+            .get_with_guard(&sentinel.to_be_bytes(), &guard)
+            .unwrap(),
+        1
+    );
 }

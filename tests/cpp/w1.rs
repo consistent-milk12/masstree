@@ -31,10 +31,21 @@ fn w1_single_thread() {
     let guard = tree.guard();
     let mut rng = StdRng::seed_from_u64(SEED);
 
-    for _ in 0..N {
+    let mut sample: Vec<[u8; 10]> = Vec::new();
+
+    for n in 0..N {
         let x: u64 = rng.random();
         let key = make_key10(x);
         tree.insert_with_guard(&key, x + 1, &guard);
+
+        if n % 1000 == 0 {
+            sample.push(key);
+        }
+    }
+
+    assert!(tree.len() > 0);
+    for key in sample {
+        assert!(tree.get_with_guard(&key, &guard).is_some());
     }
 }
 
@@ -76,6 +87,12 @@ fn w1_concurrent(num_threads: usize) {
     for h in handles {
         h.join().unwrap();
     }
+
+    assert!(tree.len() > 0);
+    let guard = tree.guard();
+    let sentinel: &[u8] = b"__________";
+    tree.insert_with_guard(sentinel, 1, &guard);
+    assert_eq!(*tree.get_with_guard(sentinel, &guard).unwrap(), 1);
 }
 
 #[test]
