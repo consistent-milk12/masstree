@@ -1,5 +1,5 @@
    Compiling alloca v0.4.0
-   Compiling masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+   Compiling masstree v0.9.5 (.)
    Compiling criterion v0.8.2
     Finished `test` profile [unoptimized + debuginfo] target(s) in 3.43s
      Running tests/batch_insert_tests.rs (target/debug/deps/batch_insert_tests-81c87a659e8177dc)

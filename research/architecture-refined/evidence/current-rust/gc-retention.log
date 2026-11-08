@@ -1,5 +1,5 @@
-   Compiling masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
-   Compiling audit-remove-coalesce v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/remove-coalesce)
+   Compiling masstree v0.9.5 (.)
+   Compiling audit-remove-coalesce v0.1.0 (./failures/remove-coalesce)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.51s
      Running tests/sublayer_leak.rs (/tmp/masstree-doc-review/target/debug/deps/sublayer_leak-abe430e43e7f951f)
 

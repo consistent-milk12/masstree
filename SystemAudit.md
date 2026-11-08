@@ -1,6 +1,6 @@
 # System Audit — `masstree` 0.9.5
 
-**Repository:** `/home/saad/Desktop/Programming/masstree`  
+**Repository:** `masstree`  
 **Commit audited:** `eb8bee2e546e` (`REFACTOR: Deduplicate insert and batch paths via strategy traits`)  
 **Crate:** `masstree` 0.9.5, Rust edition 2024  
 **Audit date:** 2026-10-23  

@@ -1,6 +1,6 @@
 BatchEntry drop leak: 2000 allocations still live
 
-thread 'main' (3433) panicked at /home/saad/Desktop/Programming/masstree/src/key.rs:43:9:
+thread 'main' (3433) panicked at ./src/key.rs:43:9:
 key length 257 exceeds maximum 256
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 panic caught: true tree.len()=1 get(empty)=Some("applied")

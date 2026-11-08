@@ -1,8 +1,8 @@
-   Compiling leaf-values-repro v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/leaf-values/public)
+   Compiling leaf-values-repro v0.1.0 (./failures/leaf-values/public)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
-     Running `/home/saad/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner /tmp/masstree-doc-review/target-miri/miri/x86_64-unknown-linux-gnu/debug/valueptr_race`
+     Running `~/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo-miri runner /tmp/masstree-doc-review/target-miri/miri/x86_64-unknown-linux-gnu/debug/valueptr_race`
 error: Undefined Behavior: Data race detected between (1) non-atomic read on thread `main` and (2) atomic store on thread `unnamed-1` at alloc4491
-  --> /home/saad/Desktop/Programming/masstree/src/policy/box_values.rs:52:18
+  --> ./src/policy/box_values.rs:52:18
    |
 52 |             8 => (*$ptr.cast::<AtomicU64>()).store(StdMem::transmute_copy($value), $ordering),
    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ (2) just happened here
@@ -20,23 +20,23 @@ help: and (1) occurred earlier here
    = note: this is on thread `unnamed-1`
    = note: stack backtrace:
            0: masstree::policy::box_values::atomic_write_value::<u64>
-               at /home/saad/Desktop/Programming/masstree/src/policy/box_values.rs:52:18: 52:94
+               at ./src/policy/box_values.rs:52:18: 52:94
            1: masstree::policy::box_values::BoxValueArray::<u64>::write_through_update
-               at /home/saad/Desktop/Programming/masstree/src/policy/box_values.rs:149:18: 149:70
+               at ./src/policy/box_values.rs:149:18: 149:70
            2: <masstree::BoxPolicy<u64> as masstree::LeafPolicy>::write_through_update
-               at /home/saad/Desktop/Programming/masstree/src/policy.rs:842:18: 842:62
+               at ./src/policy.rs:842:18: 842:62
            3: masstree::LeafNode15::<masstree::BoxPolicy<u64>>::write_through_update_value
-               at /home/saad/Desktop/Programming/masstree/src/leaf15.rs:311:18: 311:72
+               at ./src/leaf15.rs:311:18: 311:72
            4: masstree::tree::generic::insert::<impl masstree::MassTreeGeneric<masstree::BoxPolicy<u64>, masstree::SeizeAllocator<masstree::BoxPolicy<u64>>>>::update_existing_value_write_through
-               at /home/saad/Desktop/Programming/masstree/src/tree/generic/insert.rs:161:18: 161:66
+               at ./src/tree/generic/insert.rs:161:18: 161:66
            5: <masstree::tree::generic::insert_strategy::WriteThroughInsert as masstree::tree::generic::insert_strategy::InsertStrategy<masstree::BoxPolicy<u64>, masstree::SeizeAllocator<masstree::BoxPolicy<u64>>>>::update_existing
-               at /home/saad/Desktop/Programming/masstree/src/tree/generic/insert_strategy.rs:86:9: 86:74
+               at ./src/tree/generic/insert_strategy.rs:86:9: 86:74
            6: masstree::tree::generic::insert::<impl masstree::MassTreeGeneric<masstree::BoxPolicy<u64>, masstree::SeizeAllocator<masstree::BoxPolicy<u64>>>>::insert_concurrent::<masstree::tree::generic::insert_strategy::WriteThroughInsert>
-               at /home/saad/Desktop/Programming/masstree/src/tree/generic/insert.rs:579:29: 579:91
+               at ./src/tree/generic/insert.rs:579:29: 579:91
            7: masstree::tree::generic::insert::<impl masstree::MassTreeGeneric<masstree::BoxPolicy<u64>, masstree::SeizeAllocator<masstree::BoxPolicy<u64>>>>::insert_concurrent_value
-               at /home/saad/Desktop/Programming/masstree/src/tree/generic/insert.rs:294:9: 294:72
+               at ./src/tree/generic/insert.rs:294:9: 294:72
            8: masstree::tree::generic::<impl masstree::MassTreeGeneric<masstree::BoxPolicy<u64>, masstree::SeizeAllocator<masstree::BoxPolicy<u64>>>>::insert
-               at /home/saad/Desktop/Programming/masstree/src/tree/generic.rs:641:19: 641:72
+               at ./src/tree/generic.rs:641:19: 641:72
            9: main::{closure#0}::{closure#0}
                at src/bin/valueptr_race.rs:15:25: 15:45
 note: the last function in that backtrace got called indirectly due to this code

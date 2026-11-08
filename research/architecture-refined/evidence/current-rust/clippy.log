@@ -1,4 +1,4 @@
-    Checking masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+    Checking masstree v0.9.5 (.)
 error: used `debug_assert!` to check that a value is not empty
    --> src/tree/coalesce.rs:774:9
     |

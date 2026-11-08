@@ -1,4 +1,4 @@
-   Compiling audit-remove-coalesce v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/remove-coalesce)
+   Compiling audit-remove-coalesce v0.1.0 (./failures/remove-coalesce)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
      Running tests/double_unlink_deterministic.rs (/tmp/masstree-doc-review/target/debug/deps/double_unlink_deterministic-16f3bf291ff42ec6)
 

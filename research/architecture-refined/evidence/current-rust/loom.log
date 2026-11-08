@@ -1,6 +1,6 @@
    Compiling alloca v0.4.0
    Compiling criterion v0.8.2
-   Compiling masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+   Compiling masstree v0.9.5 (.)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 6.21s
      Running unittests src/lib.rs (target/debug/deps/masstree-938f1678a7a44e11)
 

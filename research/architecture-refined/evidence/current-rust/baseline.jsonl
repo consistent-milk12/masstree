@@ -1,13 +1,13 @@
-{"label": "fmt", "command": ["cargo", "fmt", "--all", "--", "--check"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 0.67, "log": "fmt.log"}
-{"label": "integration", "command": ["cargo", "test", "--offline", "--test", "leak_tests", "--test", "batch_insert_tests", "--test", "true_inline"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 3.58, "log": "integration.log"}
-{"label": "doctests", "command": ["cargo", "test", "--offline", "--doc"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 1.02, "log": "doctests.log"}
-{"label": "check-default", "command": ["cargo", "check", "--offline"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 1.02, "log": "check-default.log"}
-{"label": "check-no-default", "command": ["cargo", "check", "--offline", "--no-default-features"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 1.02, "log": "check-no-default.log"}
-{"label": "check-all-features", "command": ["cargo", "check", "--offline", "--all-features"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 1.88, "log": "check-all-features.log"}
-{"label": "check-sidecar", "command": ["cargo", "check", "--offline", "--features", "sidecar-suffix"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 0.92, "log": "check-sidecar.log"}
-{"label": "check-small-suffix", "command": ["cargo", "check", "--offline", "--features", "small-suffix-capacity"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 0.97, "log": "check-small-suffix.log"}
-{"label": "check-no-prefetch", "command": ["cargo", "check", "--offline", "--features", "no-prefetch"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 0.97, "log": "check-no-prefetch.log"}
-{"label": "check-tests", "command": ["cargo", "check", "--offline", "--tests"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 0, "seconds": 3.58, "log": "check-tests.log"}
-{"label": "check-all-targets-no-default", "command": ["cargo", "check", "--offline", "--all-targets", "--no-default-features"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 101, "seconds": 2.48, "log": "check-all-targets-no-default.log"}
-{"label": "clippy", "command": ["cargo", "clippy", "--offline", "--all-targets", "--all-features", "--", "-D", "warnings"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {}, "exit": 101, "seconds": 2.97, "log": "clippy.log"}
-{"label": "loom", "command": ["cargo", "test", "--offline", "--lib", "loom_tests"], "cwd": "/home/saad/Desktop/Programming/masstree", "env": {"RUSTFLAGS": "--cfg loom"}, "exit": 0, "seconds": 8.13, "log": "loom.log"}
+{"label": "fmt", "command": ["cargo", "fmt", "--all", "--", "--check"], "cwd": ".", "env": {}, "exit": 0, "seconds": 0.67, "log": "fmt.log"}
+{"label": "integration", "command": ["cargo", "test", "--offline", "--test", "leak_tests", "--test", "batch_insert_tests", "--test", "true_inline"], "cwd": ".", "env": {}, "exit": 0, "seconds": 3.58, "log": "integration.log"}
+{"label": "doctests", "command": ["cargo", "test", "--offline", "--doc"], "cwd": ".", "env": {}, "exit": 0, "seconds": 1.02, "log": "doctests.log"}
+{"label": "check-default", "command": ["cargo", "check", "--offline"], "cwd": ".", "env": {}, "exit": 0, "seconds": 1.02, "log": "check-default.log"}
+{"label": "check-no-default", "command": ["cargo", "check", "--offline", "--no-default-features"], "cwd": ".", "env": {}, "exit": 0, "seconds": 1.02, "log": "check-no-default.log"}
+{"label": "check-all-features", "command": ["cargo", "check", "--offline", "--all-features"], "cwd": ".", "env": {}, "exit": 0, "seconds": 1.88, "log": "check-all-features.log"}
+{"label": "check-sidecar", "command": ["cargo", "check", "--offline", "--features", "sidecar-suffix"], "cwd": ".", "env": {}, "exit": 0, "seconds": 0.92, "log": "check-sidecar.log"}
+{"label": "check-small-suffix", "command": ["cargo", "check", "--offline", "--features", "small-suffix-capacity"], "cwd": ".", "env": {}, "exit": 0, "seconds": 0.97, "log": "check-small-suffix.log"}
+{"label": "check-no-prefetch", "command": ["cargo", "check", "--offline", "--features", "no-prefetch"], "cwd": ".", "env": {}, "exit": 0, "seconds": 0.97, "log": "check-no-prefetch.log"}
+{"label": "check-tests", "command": ["cargo", "check", "--offline", "--tests"], "cwd": ".", "env": {}, "exit": 0, "seconds": 3.58, "log": "check-tests.log"}
+{"label": "check-all-targets-no-default", "command": ["cargo", "check", "--offline", "--all-targets", "--no-default-features"], "cwd": ".", "env": {}, "exit": 101, "seconds": 2.48, "log": "check-all-targets-no-default.log"}
+{"label": "clippy", "command": ["cargo", "clippy", "--offline", "--all-targets", "--all-features", "--", "-D", "warnings"], "cwd": ".", "env": {}, "exit": 101, "seconds": 2.97, "log": "clippy.log"}
+{"label": "loom", "command": ["cargo", "test", "--offline", "--lib", "loom_tests"], "cwd": ".", "env": {"RUSTFLAGS": "--cfg loom"}, "exit": 0, "seconds": 8.13, "log": "loom.log"}

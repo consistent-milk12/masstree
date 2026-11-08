@@ -1,4 +1,4 @@
-   Compiling insert-split-audit v0.1.0 (/home/saad/Desktop/Programming/masstree/failures/insert-split)
+   Compiling insert-split-audit v0.1.0 (./failures/insert-split)
 warning: unused variable: `bg`
   --> src/bin/livelock2.rs:23:9
    |

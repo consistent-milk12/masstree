@@ -26,11 +26,11 @@
    Compiling regex-automata v0.4.18
    Compiling generator v0.8.8
    Compiling seize v0.5.1
-   Compiling masstree v0.9.5 (/home/saad/Desktop/Programming/masstree)
+   Compiling masstree v0.9.5 (.)
    Compiling matchers v0.2.0
    Compiling tracing-subscriber v0.3.23
    Compiling loom v0.7.2
-   Compiling masstree-architecture-evidence v0.0.0 (/home/saad/Desktop/Programming/masstree/research/architecture-refined)
+   Compiling masstree-architecture-evidence v0.0.0 (./research/architecture-refined)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 4.84s
      Running unittests src/lib.rs (research/architecture-refined/target/debug/deps/masstree_architecture_evidence-02f72e4a138b4948)
 
