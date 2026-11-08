@@ -1680,17 +1680,20 @@ layer transitions, and splits.
 
 `batch_common.rs` is direction-parameterized (`Forward`/`Backward` zero-sized
 markers, `BatchDirection` trait). `process_batch_keyed` loops over a leaf's
-permutation, materializes keys only when needed, descends layers, and validates
-OCC once per leaf. Both batch processors follow a strict snapshot protocol: read
-the slot metadata/suffix/value first, validate the leaf version, and only then
-commit the cursor or layer stack. A callback that mutates the current leaf
-therefore cannot corrupt the position a retry uses. `RangeBound::cursor_bound`
+permutation and uses `helper::try_snapshot_slot` to capture the complete
+key/suffix/value handle or layer pointer. Every slot, including an empty one,
+is validated before cursor/stack mutation. Visitors receive the captured value
+and never reload a slot after validation; reference visitors dereference only
+the validated, guard-protected pointer, using an atomic copy for write-through
+values. `process_batch_values` adapts the same loop with a value-only callback.
+A callback that mutates the current leaf therefore cannot corrupt the position
+a retry uses. `RangeBound::cursor_bound`
 classifies a bound inside the current sublayer once (`Inside`, `At(ikey)`, or
 `Outside`) by comparing the consumed prefix, so a values-only scan never
 descends a layer whose keys are all beyond the bound and never needs a per-slot
-key comparison inside a wholly-in-range sublayer. `process_batch_values` still
-skips interior key materialization, performing a full-key bound check only at
-the bound's 8-byte ikey. The cursor records ikey/length (and the `KSUF` suffix)
+key comparison inside a wholly-in-range sublayer. Both variants perform a full
+key bound check only at the bound's 8-byte ikey. The cursor records ikey/length
+(and the `KSUF` suffix)
 for cold retries, and both directions track whether the cursor holds an
 already-emitted key so a retry cannot re-emit it. `batch_forward.rs` and
 `batch_reverse.rs` expose `for_each*` methods that drive the scan state machine

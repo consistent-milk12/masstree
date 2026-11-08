@@ -13,6 +13,143 @@ use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::policy::LeafPolicy;
 
 use super::cursor_key::CursorKey;
+use super::scan_state::{ScanSnapshot, ScanSnapshotPtr};
+
+/// Abstracts clone vs zero-copy value emission for per-entry scanning.
+pub trait ScanEmitter<P: LeafPolicy> {
+    type Snapshot;
+
+    /// Load a value from `leaf[slot]` and wrap it with `key_len`.
+    fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<Self::Snapshot>;
+}
+
+/// Clone-based emitter: calls `leaf.load_value(slot)`, returns `ScanSnapshot<P>`.
+pub struct CloneEmitter;
+
+impl<P: LeafPolicy> ScanEmitter<P> for CloneEmitter
+where
+    P::Output: Clone,
+{
+    type Snapshot = ScanSnapshot<P>;
+
+    #[inline(always)]
+    fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<ScanSnapshot<P>> {
+        let output = leaf.load_value(slot)?;
+        Some(ScanSnapshot {
+            value: output,
+            key_len,
+        })
+    }
+}
+
+/// Zero-copy emitter: calls `leaf.load_value_raw(slot)`, returns `ScanSnapshotPtr<P::Value>`.
+///
+/// For `CAN_WRITE_THROUGH` types, callers must use `ScanSnapshotPtr::value_copy`
+/// (atomic read) instead of `value_ref` to avoid aliasing violations.
+pub struct PtrEmitter;
+
+impl<P: LeafPolicy> ScanEmitter<P> for PtrEmitter {
+    type Snapshot = ScanSnapshotPtr<P::Value>;
+
+    #[inline(always)]
+    fn emit_value(
+        leaf: &LeafNode15<P>,
+        slot: usize,
+        key_len: usize,
+    ) -> Option<ScanSnapshotPtr<P::Value>> {
+        let ptr = leaf.load_value_raw(slot);
+        if ptr.is_null() {
+            return None;
+        }
+        Some(ScanSnapshotPtr::from_raw(ptr, key_len))
+    }
+}
+
+/// One slot's speculative payload, usable only after the enclosing snapshot validates.
+pub enum SlotPayload<S> {
+    Empty,
+    Layer(*mut u8),
+    Value(S),
+}
+
+/// Complete slot data read under one OCC version. Suffix bytes are immutable
+/// while the scan guard protects their storage; no slot reload is needed.
+pub struct ValidatedSlot<'a, S> {
+    pub ikey: u64,
+    pub keylenx: u8,
+    pub suffix: Option<&'a [u8]>,
+    pub payload: SlotPayload<S>,
+}
+
+/// Read the complete key/payload, then validate before any cursor mutation or
+/// callback. The caller keeps this leaf and its reachable storage guard-protected.
+/// Emitters capture handles only: pointer dereferences happen after validation.
+#[inline(always)]
+pub fn try_snapshot_slot<P: LeafPolicy, E: ScanEmitter<P>>(
+    leaf: &LeafNode15<P>,
+    slot: usize,
+    version: u32,
+) -> Result<ValidatedSlot<'_, E::Snapshot>, ()> {
+    let ikey = leaf.ikey_relaxed(slot);
+    let keylenx = leaf.keylenx_relaxed(slot);
+    let mut suffix = None;
+    let payload = if keylenx >= LAYER_KEYLENX {
+        let root = leaf.load_layer_raw(slot);
+        if root.is_null() {
+            SlotPayload::Empty
+        } else {
+            SlotPayload::Layer(root)
+        }
+    } else {
+        if keylenx == KSUF_KEYLENX {
+            suffix = leaf.ksuf(slot);
+        }
+        let key_len = if keylenx == KSUF_KEYLENX {
+            IKEY_SIZE + suffix.map_or(0, <[u8]>::len)
+        } else {
+            usize::from(keylenx)
+        };
+        E::emit_value(leaf, slot, key_len).map_or(SlotPayload::Empty, SlotPayload::Value)
+    };
+    if crate::nodeversion::NodeVersion::is_deleted_version(version)
+        || leaf.version().has_changed(version)
+    {
+        return Err(());
+    }
+    Ok(ValidatedSlot {
+        ikey,
+        keylenx,
+        suffix,
+        payload,
+    })
+}
+
+/// Build the full key from an already-snapshotted slot.
+///
+/// The caller must have validated the leaf version after reading the
+/// snapshot, so this never re-reads a slot that a writer may have reused.
+#[inline(always)]
+pub fn build_slot_key_parts(
+    cursor_key: &mut CursorKey,
+    slot_ikey: u64,
+    slot_keylenx: u8,
+    suffix: Option<&[u8]>,
+) {
+    cursor_key.assign_store_ikey(slot_ikey);
+
+    if slot_keylenx == KSUF_KEYLENX {
+        if let Some(suffix) = suffix {
+            let suffix_len = suffix.len();
+            let _ = cursor_key.assign_store_suffix(suffix);
+            cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
+        } else {
+            cursor_key.assign_store_length(IKEY_SIZE);
+        }
+    } else {
+        let len = slot_keylenx as usize;
+        cursor_key.assign_store_length(len);
+    }
+}
 
 // ============================================================================
 //  KeyIndexedPosition

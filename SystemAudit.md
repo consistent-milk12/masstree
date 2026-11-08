@@ -2351,6 +2351,16 @@ a concurrent scan+split test and a scan after promotion test.
 
 **Severity:** High · **Confidence:** Confirmed (six deterministic API variants)
 
+**Proposal follow-up:** The earlier per-slot checks still left keyed visitors
+reloading the value after validating the key. A deterministic delivery hook in
+`batch_common/unit_tests.rs` reused physical slot 5 after validation and observed
+key 6 paired with value 16. The shared `try_snapshot_slot` kernel now captures
+the value handle as well as key/suffix metadata before validation; visitors never
+reload the slot. Keyed and values-only batches share one loop. Forward/reverse
+inline, boxed copy and boxed reference regressions cover slot reuse and layer
+conversion, passing natively and under Miri. The Loom key/handle litmus covers
+the version ordering only. Historical reproducer details follow.
+
 **Location:** `src/tree/range/batch_common.rs:378-471,481-547`
 (`process_batch_keyed` / `process_batch_values`),
 `src/tree/range/forward_ctx.rs:1045-1059`,

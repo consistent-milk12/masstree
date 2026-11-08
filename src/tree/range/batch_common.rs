@@ -3,66 +3,32 @@
 use crate::permuter::Permuter15;
 use std::cmp::Ordering;
 
-use crate::hints::unlikely;
-use crate::key::IKEY_SIZE;
-use crate::leaf15::KSUF_KEYLENX;
-use crate::leaf15::LAYER_KEYLENX;
 use crate::leaf15::LeafNode15;
-use crate::ordering::READ_ORD;
 use crate::policy::LeafPolicy;
-use crate::policy::atomic_read_value;
 use crate::prefetch::prefetch_read;
 
 use super::cursor_key::CursorKey;
 use super::find::LeafBatchResult;
 use super::find_rev::LeafBatchResultBack;
+use super::helper::{
+    CloneEmitter, PtrEmitter, ScanEmitter, SlotPayload, build_slot_key_parts, try_snapshot_slot,
+};
 use super::iterator::CursorBound;
 use super::iterator::RangeBound;
 use super::iterator::iter_flags::ReverseFlags;
 use super::scan_state::{LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr};
 
-/// Build the full key from an already-snapshotted slot.
-///
-/// The caller must have validated the leaf version after reading the
-/// snapshot, so this never re-reads a slot that a writer may have reused.
-#[inline(always)]
-pub fn build_slot_key_parts(
-    cursor_key: &mut CursorKey,
-    slot_ikey: u64,
-    slot_keylenx: u8,
-    suffix: Option<&[u8]>,
-) {
-    cursor_key.assign_store_ikey(slot_ikey);
+#[cfg(test)]
+mod unit_tests;
 
-    if slot_keylenx == KSUF_KEYLENX {
-        if let Some(suffix) = suffix {
-            let suffix_len = suffix.len();
-            let _ = cursor_key.assign_store_suffix(suffix);
-            cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
-        } else {
-            cursor_key.assign_store_length(IKEY_SIZE);
-        }
-    } else {
-        let len = slot_keylenx as usize;
-        cursor_key.assign_store_length(len);
-    }
-}
-
-/// Visitor for batch slot processing.
+/// Delivers a value captured before OCC validation. Visitors never reload slots.
 pub trait SlotVisitor<P: LeafPolicy> {
-    /// Visit a slot after key has been built in `cursor_key`.
-    ///
-    /// # Returns
-    ///
-    /// - `None`: Value was concurrently removed
-    /// - `Some(true)`: Continue scanning
-    /// - `Some(false)`: Visitor requested stop
-    fn visit(&mut self, leaf: &LeafNode15<P>, slot: usize, key: &[u8]) -> Option<bool>;
+    type Emitter: ScanEmitter<P>;
+
+    fn visit(&mut self, snapshot: <Self::Emitter as ScanEmitter<P>>::Snapshot, key: &[u8]) -> bool;
 }
 
-/// Ref visitor: loads `&P::Value` via pointer dereference.
-///
-/// For use with `RefLeafPolicy` types where values are pointer-backed (Arc, Box).
+/// Reference visitor over a validated, guard-protected pointer snapshot.
 pub struct RefSlotVisitor<F>(pub F);
 
 impl<P, F> SlotVisitor<P> for RefSlotVisitor<F>
@@ -70,48 +36,25 @@ where
     P: LeafPolicy,
     F: FnMut(&[u8], &P::Value) -> bool,
 {
+    type Emitter = PtrEmitter;
+
     #[inline(always)]
-    fn visit(&mut self, leaf: &LeafNode15<P>, slot: usize, key: &[u8]) -> Option<bool> {
+    fn visit(&mut self, snapshot: ScanSnapshotPtr<P::Value>, key: &[u8]) -> bool {
         if P::can_write_through() {
-            // Atomic read avoids aliasing violation with concurrent
-            // write_through_update. The copy lives on the stack, so the
-            // callback's &V is to owned data, not the mutable Box allocation.
-            // Relaxed pointer load: the subsequent atomic_read_value(Acquire)
-            // provides synchronization for the value contents. The pointer
-            // itself is stable under write-through (Box is never swapped).
-            let raw: *mut u8 = leaf.load_value_raw_relaxed(slot);
-
-            if raw.is_null() {
-                return None;
-            }
-
-            // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with natural
-            // alignment. Guard protects the allocation from retirement.
-            let v: P::Value = unsafe { atomic_read_value::<P::Value>(raw, READ_ORD) };
-
-            Some((self.0)(key, &v))
+            // SAFETY: The pointer was loaded before OCC validation and remains
+            // protected by the scan guard. This sealed policy permits atomic
+            // copies; removal/reuse cannot change the captured allocation's key.
+            let value = unsafe { snapshot.value_copy() };
+            (self.0)(key, &value)
         } else {
-            // SAFETY: Guard protects value, slot is valid (in permutation).
-            // Null-check handles TOCTOU race.
-            let ptr: *const P::Value = unsafe { leaf.load_value_ptr(slot) };
-
-            if ptr.is_null() {
-                return None;
-            }
-
-            // SAFETY: Non-null pointer to a valid P::Value, protected by OCC
-            // guard. No concurrent modification (non-write-through types
-            // allocate a new Box on update).
-            let value_ref: &P::Value = unsafe { &*ptr };
-
-            Some((self.0)(key, value_ref))
+            // SAFETY: Validation identified a terminal pointer; the guard keeps
+            // it alive. Non-write-through values are replaced, never mutated.
+            (self.0)(key, unsafe { snapshot.value_ref() })
         }
     }
 }
 
-/// Copy visitor: loads `P::Output` via `load_value()` (universal).
-///
-/// Works for all `LeafPolicy` types including true-inline storage.
+/// Copy visitor over a validated output snapshot, including inline values.
 pub struct CopySlotVisitor<F>(pub F);
 
 impl<P, F> SlotVisitor<P> for CopySlotVisitor<F>
@@ -119,62 +62,11 @@ where
     P: LeafPolicy,
     F: FnMut(&[u8], P::Output) -> bool,
 {
-    #[inline(always)]
-    fn visit(&mut self, leaf: &LeafNode15<P>, slot: usize, key: &[u8]) -> Option<bool> {
-        // Use load_value to handle TOCTOU race.
-        let output: P::Output = leaf.load_value(slot)?;
-
-        Some((self.0)(key, output))
-    }
-}
-
-/// Abstracts clone vs zero-copy value emission for per-entry scanning.
-pub trait ScanEmitter<P: LeafPolicy> {
-    type Snapshot;
-
-    /// Load a value from `leaf[slot]` and wrap it with `key_len`.
-    fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<Self::Snapshot>;
-}
-
-/// Clone-based emitter: calls `leaf.load_value(slot)`, returns `ScanSnapshot<P>`.
-pub struct CloneEmitter;
-
-impl<P: LeafPolicy> ScanEmitter<P> for CloneEmitter
-where
-    P::Output: Clone,
-{
-    type Snapshot = ScanSnapshot<P>;
+    type Emitter = CloneEmitter;
 
     #[inline(always)]
-    fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<ScanSnapshot<P>> {
-        let output = leaf.load_value(slot)?;
-        Some(ScanSnapshot {
-            value: output,
-            key_len,
-        })
-    }
-}
-
-/// Zero-copy emitter: calls `leaf.load_value_raw(slot)`, returns `ScanSnapshotPtr<P::Value>`.
-///
-/// For `CAN_WRITE_THROUGH` types, callers must use `ScanSnapshotPtr::value_copy`
-/// (atomic read) instead of `value_ref` to avoid aliasing violations.
-pub struct PtrEmitter;
-
-impl<P: LeafPolicy> ScanEmitter<P> for PtrEmitter {
-    type Snapshot = ScanSnapshotPtr<P::Value>;
-
-    #[inline(always)]
-    fn emit_value(
-        leaf: &LeafNode15<P>,
-        slot: usize,
-        key_len: usize,
-    ) -> Option<ScanSnapshotPtr<P::Value>> {
-        let ptr = leaf.load_value_raw(slot);
-        if ptr.is_null() {
-            return None;
-        }
-        Some(ScanSnapshotPtr::from_raw(ptr, key_len))
+    fn visit(&mut self, snapshot: ScanSnapshot<P>, key: &[u8]) -> bool {
+        (self.0)(key, snapshot.value)
     }
 }
 
@@ -393,194 +285,43 @@ where
 
     while ctx.ki >= 0 && ctx.ki.unsigned_abs() < ctx.perm_size {
         let slot: usize = ctx.perm.get(ctx.ki.unsigned_abs());
-        let slot_ikey: u64 = ctx.leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = ctx.leaf.keylenx_relaxed(slot);
-
         D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, ctx.perm);
 
-        // Phase 1: speculative reads only. Neither the cursor nor the layer
-        // stack may change until the version check below succeeds, otherwise a
-        // retry would reposition from a slot the scan never emitted.
-        if unlikely(slot_keylenx >= LAYER_KEYLENX) {
-            let layer_ptr: *mut u8 = ctx.leaf.load_layer_raw(slot);
-
-            if ctx.leaf.version().has_changed(ctx.cached_version) {
-                return D::version_changed();
-            }
-
-            match cursor_bound {
-                CursorBound::Outside => return D::bound_exceeded(),
-
-                CursorBound::At(b_ikey) if slot_ikey.cmp(&b_ikey) == D::exceeded_ordering() => {
-                    return D::bound_exceeded();
-                }
-
-                CursorBound::At(_) | CursorBound::Inside => {}
-            }
-
-            let same_prefix: bool = slot_ikey == ctx.cursor_key.current_ikey();
-            let real_suffix: bool =
-                ctx.cursor_key.has_suffix() && !ctx.cursor_key.is_unshift_sentinel();
-            ctx.down_follow_suffix = same_prefix && real_suffix;
-            ctx.down_fresh_subtree = !same_prefix;
-
-            ctx.layer_stack
-                .push(LayerContext::new(ctx.root, ctx.leaf_ptr));
-            ctx.cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(layer_ptr);
-            ctx.root = layer_ptr.cast_const();
-            ctx.ki = D::layer_ki(ctx.ki);
-            return D::layer_encountered();
-        }
-
-        // Empty value check: validate before skipping so a concurrent
-        // remove/reuse turns into a retry instead of a silently lost entry.
-        if unlikely(ctx.leaf.is_value_empty_relaxed(slot)) {
-            if ctx.leaf.version().has_changed(ctx.cached_version) {
-                return D::version_changed();
-            }
-
-            ctx.ki = D::step(ctx.ki);
-            continue;
-        }
-
-        // Snapshot the suffix before validation; key construction must not
-        // re-read a slot a writer may have reused in the meantime.
-        let suffix: Option<&[u8]> = if slot_keylenx == KSUF_KEYLENX {
-            ctx.leaf.ksuf(slot)
-        } else {
-            None
-        };
-
-        // Phase 2: OCC validation. On failure the cursor still holds the last
-        // validly emitted key, so the retry repositions correctly.
-        if ctx.leaf.version().has_changed(ctx.cached_version) {
+        let Ok(captured) = try_snapshot_slot::<P, V::Emitter>(ctx.leaf, slot, ctx.cached_version)
+        else {
             return D::version_changed();
-        }
-
-        // Phase 3: commit the validated snapshot and check the full-key bound.
-        build_slot_key_parts(ctx.cursor_key, slot_ikey, slot_keylenx, suffix);
-        ctx.cursor_key.mark_key_complete();
-
-        let key: &[u8] = ctx.cursor_key.full_key();
-        if !D::key_in_bound(bound, key) {
-            return D::bound_exceeded();
-        }
-
-        D::on_pre_emit(flags);
-
-        // Visit slot. The visitor re-reads the value; its null result handles
-        // a value removed between validation and the load.
-        match slot_visitor.visit(ctx.leaf, slot, key) {
-            None => {
-                ctx.ki = D::step(ctx.ki);
-            }
-
-            Some(should_continue) => {
-                *count += 1;
-                ctx.ki = D::step(ctx.ki);
-
-                if !should_continue {
-                    return D::stopped();
-                }
-            }
-        }
-    }
-
-    if ctx.leaf.version().has_changed(ctx.cached_version) {
-        return D::version_changed();
-    }
-
-    D::exhausted()
-}
-
-// ============================================================================
-//  Unified Values-Only Batch Processor
-// ============================================================================
-
-/// Direction-parameterized values-only batch processor (no key materialization).
-#[inline]
-pub fn process_batch_values<D, P>(
-    ctx: &mut BatchCtx<'_, P>,
-    bound: &RangeBound<'_>,
-    cursor_bound: CursorBound,
-    visitor: &mut impl FnMut(P::Output) -> bool,
-    count: &mut usize,
-    flags: &mut D::Flags,
-) -> D::Result
-where
-    D: BatchDirection,
-    P: LeafPolicy,
-{
-    if ctx.leaf.version().is_deleted() {
-        return D::version_changed();
-    }
-
-    while ctx.ki >= 0 && ctx.ki.unsigned_abs() < ctx.perm_size {
-        let slot: usize = ctx.perm.get(ctx.ki.unsigned_abs());
-        let slot_ikey: u64 = ctx.leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = ctx.leaf.keylenx_relaxed(slot);
-
-        D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, ctx.perm);
-
-        // Phase 1: speculative reads only. A layer pointer cannot be converted
-        // to a full key, so its ikey decides whether descending can contribute
-        // values. Validate before mutating the stack or cursor.
-        if unlikely(slot_keylenx >= LAYER_KEYLENX) {
-            let layer_ptr: *mut u8 = ctx.leaf.load_layer_raw(slot);
-
-            if ctx.leaf.version().has_changed(ctx.cached_version) {
-                return D::version_changed();
-            }
-
-            match cursor_bound {
-                CursorBound::Outside => return D::bound_exceeded(),
-
-                CursorBound::At(b_ikey) if slot_ikey.cmp(&b_ikey) == D::exceeded_ordering() => {
-                    return D::bound_exceeded();
-                }
-
-                CursorBound::At(_) | CursorBound::Inside => {}
-            }
-
-            let same_prefix: bool = slot_ikey == ctx.cursor_key.current_ikey();
-            let real_suffix: bool =
-                ctx.cursor_key.has_suffix() && !ctx.cursor_key.is_unshift_sentinel();
-            ctx.down_follow_suffix = same_prefix && real_suffix;
-            ctx.down_fresh_subtree = !same_prefix;
-
-            ctx.layer_stack
-                .push(LayerContext::new(ctx.root, ctx.leaf_ptr));
-            ctx.cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(layer_ptr);
-            ctx.root = layer_ptr.cast_const();
-            ctx.ki = D::layer_ki(ctx.ki);
-            return D::layer_encountered();
-        }
-
-        // Empty value check: validate before skipping.
-        if unlikely(ctx.leaf.is_value_empty_relaxed(slot)) {
-            if ctx.leaf.version().has_changed(ctx.cached_version) {
-                return D::version_changed();
-            }
-
-            ctx.ki = D::step(ctx.ki);
-            continue;
-        }
-
-        // Snapshot the suffix and the value before validation. Reading the
-        // value first is the correct OCC order: the version check covers both
-        // the key metadata and the payload.
-        let suffix: Option<&[u8]> = if slot_keylenx == KSUF_KEYLENX {
-            ctx.leaf.ksuf(slot)
-        } else {
-            None
         };
-        let output: Option<P::Output> = ctx.leaf.load_value(slot);
-
-        if ctx.leaf.version().has_changed(ctx.cached_version) {
-            return D::version_changed();
-        }
+        let slot_ikey = captured.ikey;
+        let output = match captured.payload {
+            SlotPayload::Layer(layer_ptr) => {
+                match cursor_bound {
+                    CursorBound::Outside => return D::bound_exceeded(),
+                    CursorBound::At(bound_ikey)
+                        if slot_ikey.cmp(&bound_ikey) == D::exceeded_ordering() =>
+                    {
+                        return D::bound_exceeded();
+                    }
+                    CursorBound::At(_) | CursorBound::Inside => {}
+                }
+                let same_prefix = slot_ikey == ctx.cursor_key.current_ikey();
+                let real_suffix =
+                    ctx.cursor_key.has_suffix() && !ctx.cursor_key.is_unshift_sentinel();
+                ctx.down_follow_suffix = same_prefix && real_suffix;
+                ctx.down_fresh_subtree = !same_prefix;
+                ctx.layer_stack
+                    .push(LayerContext::new(ctx.root, ctx.leaf_ptr));
+                ctx.cursor_key.assign_store_ikey(slot_ikey);
+                prefetch_read(layer_ptr);
+                ctx.root = layer_ptr.cast_const();
+                ctx.ki = D::layer_ki(ctx.ki);
+                return D::layer_encountered();
+            }
+            SlotPayload::Empty => {
+                ctx.ki = D::step(ctx.ki);
+                continue;
+            }
+            SlotPayload::Value(value) => value,
+        };
 
         // Fast ikey bound check. A full-key comparison is only needed when the
         // slot shares the bound's 8-byte ikey; every interior slot is ordered
@@ -600,27 +341,20 @@ where
             CursorBound::Inside => {}
         }
 
-        // Record the validated slot in the cursor without rebuilding the whole
-        // key. Inline slots need only the ikey and length; suffix slots copy
-        // their suffix so a cold retry can reposition exactly.
-        build_slot_key_parts(ctx.cursor_key, slot_ikey, slot_keylenx, suffix);
+        // Phase 3: commit the validated snapshot and check the full-key bound.
+        build_slot_key_parts(ctx.cursor_key, slot_ikey, captured.keylenx, captured.suffix);
         ctx.cursor_key.mark_key_complete();
 
-        if needs_full_bound && !D::key_in_bound(bound, ctx.cursor_key.full_key()) {
+        let key: &[u8] = ctx.cursor_key.full_key();
+        if needs_full_bound && !D::key_in_bound(bound, key) {
             return D::bound_exceeded();
         }
 
         D::on_pre_emit(flags);
 
-        let Some(output) = output else {
-            ctx.ki = D::step(ctx.ki);
-            continue;
-        };
-
         *count += 1;
         ctx.ki = D::step(ctx.ki);
-
-        if !visitor(output) {
+        if !slot_visitor.visit(output, key) {
             return D::stopped();
         }
     }
@@ -630,4 +364,33 @@ where
     }
 
     D::exhausted()
+}
+
+// ============================================================================
+//  Unified Values-Only Batch Processor
+// ============================================================================
+
+/// Values-only adapter over the same validated batch loop. The cursor still
+/// records suffix bytes so a retry can resume after the last emitted full key.
+#[inline]
+pub fn process_batch_values<D, P>(
+    ctx: &mut BatchCtx<'_, P>,
+    bound: &RangeBound<'_>,
+    cursor_bound: CursorBound,
+    visitor: &mut impl FnMut(P::Output) -> bool,
+    count: &mut usize,
+    flags: &mut D::Flags,
+) -> D::Result
+where
+    D: BatchDirection,
+    P: LeafPolicy,
+{
+    process_batch_keyed::<D, _, P>(
+        ctx,
+        bound,
+        cursor_bound,
+        &mut CopySlotVisitor(|_key: &[u8], value| visitor(value)),
+        count,
+        flags,
+    )
 }

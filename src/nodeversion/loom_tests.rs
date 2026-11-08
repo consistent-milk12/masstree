@@ -177,6 +177,36 @@ fn test_loom_relaxed_child_store_publishes_initialized_child() {
     });
 }
 
+/// Model a scan's key/handle capture before validation and callback delivery.
+/// Integer IDs stand in for guarded storage: real pointer lifetime and layer
+/// conversion are covered by batch_common's native and Miri tests.
+#[test]
+fn test_loom_scan_captures_matching_key_and_value() {
+    loom::model(|| {
+        let version = Arc::new(LoomNodeVersion::new(true));
+        let key = Arc::new(AtomicU32::new(1));
+        let value = Arc::new(AtomicU32::new(1));
+        let writer_version = Arc::clone(&version);
+        let writer_key = Arc::clone(&key);
+        let writer_value = Arc::clone(&value);
+        let writer = thread::spawn(move || {
+            let mut lock = writer_version.lock();
+            lock.mark_insert();
+            writer_key.store(2, Ordering::Relaxed);
+            writer_value.store(2, Ordering::Relaxed);
+        });
+        let observed = version.stable();
+        let captured_key = key.load(Ordering::Relaxed);
+        let captured_value = value.load(Ordering::Relaxed);
+        let accepted = !version.has_changed(observed);
+        // Delivery can happen after reuse. It must use the captured value.
+        writer.join().unwrap();
+        if accepted {
+            assert_eq!(captured_key, captured_value);
+        }
+    });
+}
+
 /// Model Entry's OCC classification followed by speculative lock/validation.
 /// This covers the version protocol, not real leaves, routing, or reclamation;
 /// those paths have native and Miri tests in entry/unit_tests.rs.

@@ -29,7 +29,7 @@ implementation must verify those observations against the current source.
 | 4 | Proposal 6: shared unrolled search, inline slot locality, Acquire stable load, internode stores | Aligned slots retain leaf sizes; 607 library tests, 15 Loom models and focused Miri pass | Complete |
 | 5 | Proposal 5: stack remove routes and remove cleanup | 32-byte / maximum-depth removal: 1 / 4 route allocations per key → 0; native and Miri | Complete |
 | 6 | Proposal 7: adaptive pool refill, suffix prefetch, speculative twig construction, remaining cleanup | Cold-allocation measurements, deterministic layer contention tests, Miri and feature checks; routing/layout evaluated | Complete |
-| 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; concurrent reverse scans and Miri | Pending |
+| 7 | Proposal 1: shared validated scan kernel and direction-parametric engine | All scan APIs against BTreeMap; concurrent reverse scans and Miri | In progress |
 
 Correctness prerequisites take precedence within each change. Proposal 2's
 `LayerAnchor` remains conditional on the profiling trigger in §3.2; PERF-12/13
@@ -185,6 +185,18 @@ AMD Ryzen 5 3600, x86_64, rustc 1.99.1, release profile).
 The tradeoff is substantial and workload-dependent. Production routing remains
 scalar pending an end-to-end workload showing which distribution to optimize;
 SIMD is not introduced without that evidence. Proposal 7 is complete.
+
+Step 7 begins with the shared `try_snapshot_slot` kernel. Keyed and values-only
+batches now use one direction-parametric loop and capture key, suffix and value
+handle before OCC validation. Their visitors consume that captured handle and
+never reload a slot. This closes a remaining RNG-10 gap: a deterministic test
+reused a slot between key validation and value delivery and observed `(6, 16)`
+instead of `(6, 6)` before the fix. Forward/reverse inline, boxed copy and boxed
+reference variants now preserve the snapshot through slot reuse and layer
+conversion, including under Miri. The promoted-layer BTreeMap probe and callback
+mutation regressions pass; a Loom key/handle model validates the ordering (not
+the whole tree/EBR implementation). Per-entry readers and context/state-machine
+unification remain in progress.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user
