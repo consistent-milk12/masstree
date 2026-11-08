@@ -1,7 +1,7 @@
 use masstree::SuffixBag;
 
 fn main() {
-    let b = SuffixBag::with_capacity(4);
+    let mut b = SuffixBag::with_capacity(4);
     b.assign(5, b"");
     b.assign(0, b"abc");
     // The next assignment cannot fit, so the bag compacts. The zero-length

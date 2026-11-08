@@ -244,7 +244,7 @@ where
                 // `output_to_value_ref` returns an atomic copy for write-through
                 // values, so `Debug` never aliases a concurrently written Box.
                 let value_ref = unsafe { P::output_to_value_ref(&v) };
-                format!("{:?}", &*value_ref)
+                format!("{:?}", *value_ref)
             }
 
             SlotKind::Layer(ptr) => {
@@ -275,6 +275,10 @@ where
 /// Print a leaf node with OCC-safe field reads and an ASCII slot table.
 ///
 /// SAFETY: `leaf_ptr` must point to a live `LeafNode15<P>` protected by EBR.
+#[expect(
+    clippy::too_many_lines,
+    reason = "The leaf header, table, and sublayer recursion form one snapshot"
+)]
 unsafe fn print_leaf<P, W>(
     ctx: &mut Ctx<'_, W>,
     leaf_ptr: *mut LeafNode15<P>,

@@ -23,7 +23,12 @@ impl SuffixBag {
     /// unpublished bag, or the drain-and-rebuild path while the leaf lock is
     /// held and readers validate with OCC. Not used for append-only concurrent
     /// assignment.
-    pub(super) fn compact_in_place(&self) {
+    ///
+    /// # Safety
+    ///
+    /// Caller must have exclusive ownership of the bag; this moves bytes and
+    /// invalidates shared slices.
+    pub(super) unsafe fn compact_in_place_locked(&self) {
         if self.count() == 0 {
             let data_ptr: *mut Vec<u8> = self.data.get();
             // SAFETY: Caller has exclusive write access.
@@ -123,12 +128,22 @@ impl SuffixBag {
     }
 
     /// Compact keeping only specified active slots, using in-place moves.
+    pub(super) fn compact(&mut self, active_slots: impl Iterator<Item = usize>) -> usize {
+        // SAFETY: `&mut self` guarantees exclusive ownership.
+        unsafe { self.compact_locked(active_slots) }
+    }
+
+    /// Compact keeping only the given active slots.
+    ///
+    /// # Safety
+    ///
+    /// Caller must have exclusive ownership of the bag.
     #[expect(clippy::indexing_slicing, reason = "Slot bounds explicitly checked")]
     #[expect(
         clippy::too_many_lines,
         reason = "Compaction keeps allocation and metadata updates together"
     )]
-    pub(super) fn compact(&self, active_slots: impl Iterator<Item = usize>) -> usize {
+    pub(super) unsafe fn compact_locked(&self, active_slots: impl Iterator<Item = usize>) -> usize {
         let old_used: usize = self.used();
         let mut entries: ArrayVec<CompactEntry, WIDTH> = ArrayVec::new();
         let mut seen: u64 = 0;
@@ -255,7 +270,7 @@ impl SuffixBag {
     ///
     /// The number of bytes reclaimed.
     pub fn compact_with_permuter<P: PermutationProvider>(
-        &self,
+        &mut self,
         perm: &P,
         exclude_slot: Option<usize>,
     ) -> usize {

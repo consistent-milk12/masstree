@@ -192,6 +192,11 @@ impl<'a> RangeBound<'a> {
     /// before the bound, a forward scan may still enter it but a reverse scan
     /// never can (and vice versa), so the whole sublayer is classified without
     /// per-slot work.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on an internal invariant violation: a bounded key must
+    /// yield an ikey.
     #[must_use]
     #[inline]
     pub fn cursor_bound(&self, cursor: &CursorKey, forward: bool) -> CursorBound {

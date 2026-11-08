@@ -74,9 +74,6 @@ where
     P: LeafPolicy,
     A: TreeAllocator<P>,
 {
-    /// Key not found in this layer.
-    NotFound,
-
     /// Key found and cursor is ready for removal.
     Ready(RemoveCursor<'t, 'g, P, A>),
 
@@ -688,28 +685,6 @@ impl NodeCleaner {
                         );
 
                         match lock_result {
-                            RemoveLockResult::NotFound => {
-                                // Re-run the B-link advance once; a split may
-                                // have moved the key while we were locking.
-                                let (next_ptr, exceeded): (*mut LeafNode15<P>, bool) =
-                                    tree.advance_to_key_by_bound_generic(leaf_ptr, &key, guard);
-
-                                if exceeded {
-                                    key.unshift_all();
-                                    layer_root = tree.load_root_ptr_generic(guard).cast_mut();
-                                    route.clear();
-                                    continue 'layer_loop;
-                                }
-
-                                if next_ptr == leaf_ptr {
-                                    return Ok(None);
-                                }
-
-                                leaf_ptr = next_ptr;
-                                // SAFETY: next_ptr is a valid leaf.
-                                leaf = unsafe { &*leaf_ptr };
-                            }
-
                             RemoveLockResult::Ready(cursor) => {
                                 return Ok(cursor.finish_remove());
                             }
@@ -872,7 +847,7 @@ impl NodeCleaner {
         pre_version: u32,
         pre_perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm,
         pre_ki: usize,
-        pre_kp: usize,
+        pre_slot: usize,
     ) -> RemoveLockResult<'t, 'g, P, A>
     where
         P: LeafPolicy,
@@ -906,10 +881,10 @@ impl NodeCleaner {
 
         let (new_ki, new_slot): (usize, usize) = if unchanged
             && pre_ki < new_perm.size()
-            && new_perm.get(pre_ki) == pre_kp
-            && !leaf.is_value_empty(pre_kp)
+            && new_perm.get(pre_ki) == pre_slot
+            && !leaf.is_value_empty(pre_slot)
         {
-            (pre_ki, pre_kp)
+            (pre_ki, pre_slot)
         } else {
             // Remediation: re-run the full-key search under the lock. The
             // pre-lock position can refer to a different key after a
@@ -973,7 +948,7 @@ impl NodeCleaner {
 
     /// Charge one retry. Returns `false` when the budget is exhausted.
     #[inline(always)]
-    fn bump_retry(retry_count: &mut usize) -> bool {
+    const fn bump_retry(retry_count: &mut usize) -> bool {
         *retry_count += 1;
         *retry_count < MAX_RETRIES
     }

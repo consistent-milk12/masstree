@@ -161,7 +161,10 @@ pub(super) unsafe fn assign_suffix_init(
         // SAFETY: ext_ptr is valid, caller holds lock. No concurrent readers
         // on unpublished leaves, so direct assign (with compaction) is safe.
         let bag: &SuffixBag = unsafe { (*ext_ptr).as_writer() };
-        bag.assign(slot, suffix);
+
+        // SAFETY: the destination is an unpublished/exclusively owned bag
+        // (init path), so compaction/reallocation cannot invalidate readers.
+        unsafe { bag.assign_locked(slot, suffix) };
         inline.clear(slot);
         return;
     }
@@ -224,7 +227,9 @@ pub(super) unsafe fn clear_suffix(
     if !ext_ptr.is_null() {
         // SAFETY: ext_ptr is valid, caller holds lock.
         let bag: &SuffixBag = unsafe { (*ext_ptr).as_writer() };
-        bag.clear(slot);
+
+        // SAFETY: caller holds the leaf lock; clear only updates atomics.
+        unsafe { bag.clear_locked(slot) };
     }
 }
 
@@ -307,14 +312,14 @@ unsafe fn drain_and_rebuild_prealloc(
 /// Caller must hold the leaf lock. `external_slot` must be valid.
 #[inline(always)]
 unsafe fn install_drained_bag(
-    new_bag: SuffixBag,
+    mut new_bag: SuffixBag,
     inline: &InlineSuffixBag,
     external_slot: &AtomicPtr<SuffixBagCell>,
     slot: usize,
     perm: &impl TreePermutation,
 ) -> *mut u8 {
     let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
-    merge_old_external_perm(&new_bag, old_external, slot, perm);
+    merge_old_external_perm(&mut new_bag, old_external, slot, perm);
 
     let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
     let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
@@ -343,10 +348,10 @@ unsafe fn drain_and_rebuild_init(
     suffix: &[u8],
     guard: &LocalGuard<'_>,
 ) {
-    let new_bag: SuffixBag = inline.drain_to_external_init(slot, suffix);
+    let mut new_bag: SuffixBag = inline.drain_to_external_init(slot, suffix);
 
     let old_external: *mut SuffixBagCell = external_slot.load(AtomicOrdering::Relaxed);
-    merge_old_external_init(&new_bag, old_external, slot);
+    merge_old_external_init(&mut new_bag, old_external, slot);
 
     let new_cell: SuffixBagCell = SuffixBagCell::from_bag(new_bag);
     let new_ptr: *mut SuffixBagCell = Box::into_raw(Box::new(new_cell));
@@ -368,7 +373,7 @@ unsafe fn drain_and_rebuild_init(
 
 /// Merge active suffixes from old external bag into new bag (permutation-based).
 fn merge_old_external_perm(
-    new_bag: &SuffixBag,
+    new_bag: &mut SuffixBag,
     old_external: *mut SuffixBagCell,
     skip_slot: usize,
     perm: &impl TreePermutation,
@@ -400,7 +405,7 @@ fn merge_old_external_perm(
 }
 
 /// Merge active suffixes from old external bag into new bag (sequential init).
-fn merge_old_external_init(new_bag: &SuffixBag, old_external: *mut SuffixBagCell, slot: usize) {
+fn merge_old_external_init(new_bag: &mut SuffixBag, old_external: *mut SuffixBagCell, slot: usize) {
     if old_external.is_null() {
         return;
     }
