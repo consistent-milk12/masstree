@@ -323,7 +323,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let x: u64 = self.value & Self::WIDTH_MASK;
         let shift_to_back: usize = (WIDTH - i - 1) * 4;
 
-        self.value = ((x - 1) & !mask) | ((x >> 4) & mask) | ((x & mask) << shift_to_back);
+        self.value = (((x - 1) & !mask) | ((x >> 4) & mask) | ((x & mask) << shift_to_back))
+            & Self::WIDTH_MASK;
 
         #[cfg(debug_assertions)]
         self.debug_assert_valid();
@@ -421,7 +422,8 @@ impl<const WIDTH: usize> Permuter<WIDTH> {
         let rotate_amount: usize = (j - i) * 4;
         let rotate_back: usize = (WIDTH - j) * 4;
 
-        self.value = (x & mask) | ((x >> rotate_amount) & !mask) | ((x & !mask) << rotate_back);
+        self.value = ((x & mask) | ((x >> rotate_amount) & !mask) | ((x & !mask) << rotate_back))
+            & Self::WIDTH_MASK;
 
         #[cfg(debug_assertions)]
         self.debug_assert_valid();
