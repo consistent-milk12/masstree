@@ -517,7 +517,10 @@ where
                     continue 'forward;
                 }
 
-                if leaf.deleted_layer() {
+                if leaf.deleted_layer() || leaf.version().is_deleted() {
+                    // A coalesced leaf may still be linked (and reachable) until
+                    // unlink completes. Never keep operating on it: restart from
+                    // the layer/main root.
                     drop(lock);
                     key.unshift_all();
                     layer_root = self.load_root_ptr_generic(guard);

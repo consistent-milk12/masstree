@@ -572,7 +572,10 @@ where
                 let next_ptr: *mut LeafNode15<P> = Linker::unmark_ptr(next_raw);
 
                 if next_ptr.is_null() {
-                    break;
+                    // A deleted rightmost leaf has no successor. Returning it
+                    // again would make the caller re-enter the same leaf
+                    // forever; force a restart from the root instead.
+                    return (leaf_ptr, true);
                 }
 
                 leaf_ptr = next_ptr;
