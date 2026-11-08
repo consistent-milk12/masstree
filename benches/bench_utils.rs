@@ -23,6 +23,13 @@ use rand::{RngExt, SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, Zipf};
 
+// Benchmark binaries opt into mimalloc here. The library itself must not set
+// `#[global_allocator]`: Cargo features are additive, and a dependency cannot
+// commandeer the final binary's allocator.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static MASSTREE_BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Multipliers for deterministic key chunk generation.
 const MULTIPLIERS: [u64; 16] = [
     1,

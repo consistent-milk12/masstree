@@ -68,9 +68,10 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::option_if_let_else)]
 
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// NOTE: this library deliberately does NOT install a `#[global_allocator]`.
+// Cargo features are additive, so a library that does so conflicts with any
+// downstream binary or dependency that defines its own allocator.
+// Benchmark binaries in `benches/` opt in through `bench_utils.rs`.
 
 /// Initialize tracing with file and console output.
 ///

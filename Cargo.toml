@@ -22,6 +22,7 @@ include = ["src/**/*", "Cargo.toml", "LICENSE", "README.md"]
 default = ["debug-print"]
 # mimalloc is the optimal allocator for this data structure based on current benchmarks.
 # Even though the original implementation prefers tcmalloc.
+# The library does not install it as a global allocator; benchmark binaries do.
 mimalloc = ["dep:mimalloc"]
 
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
