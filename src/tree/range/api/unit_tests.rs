@@ -357,7 +357,7 @@ fn test_scan_prefix_values_early_stop() {
 }
 
 #[test]
-fn test_scan_prefix_values_non_aligned_can_over_include_boundary_ikey() {
+fn test_scan_prefix_values_non_aligned_is_full_key_exact() {
     use crate::MassTree15;
 
     let tree: MassTree15<u64> = MassTree15::new();
@@ -365,8 +365,9 @@ fn test_scan_prefix_values_non_aligned_can_over_include_boundary_ikey() {
 
     let _ = tree.insert_with_guard(b"abc0", 10, &guard);
     let _ = tree.insert_with_guard(b"abc1", 11, &guard);
-    // This key is >= "abd" and should be out of the exact [abc, abd) range,
-    // but values-only scans use ikey-only end checks and may include it.
+    // This key is >= "abd" and is outside the exact [abc, abd) range. The
+    // values-only scan now performs the same full-key bound check as keyed
+    // scans instead of relying on the boundary ikey approximation.
     let _ = tree.insert_with_guard(b"abd\x00", 12, &guard);
     let _ = tree.insert_with_guard(b"abe0", 13, &guard);
 
@@ -383,7 +384,7 @@ fn test_scan_prefix_values_non_aligned_can_over_include_boundary_ikey() {
     assert_eq!(visited, values.len());
     assert!(values.contains(&10));
     assert!(values.contains(&11));
-    assert!(values.contains(&12));
+    assert!(!values.contains(&12));
     assert!(!values.contains(&13));
 }
 

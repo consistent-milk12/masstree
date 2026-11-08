@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 
 use seize::LocalGuard;
 
+use crate::IKEY_SIZE;
 use crate::leaf_trait::TreeLeafNode;
 use crate::leaf15::LeafNode15;
 use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
@@ -58,6 +59,145 @@ pub const fn initial_ksuf_match(ksuf_compare: Ordering, emit_equal: bool) -> boo
         Ordering::Equal => emit_equal,
         Ordering::Less => false,
     }
+}
+
+// ============================================================================
+//  Full-Key Comparison
+// ============================================================================
+
+/// Compare the cursor key against a leaf slot using full-key order.
+///
+/// The ikey comparison alone is insufficient: several distinct keys can share
+/// the same first eight bytes (zero-padded short keys, a terminal key and a
+/// longer suffix key, or a layer prefix). This routine orders the cursor
+/// against the whole slot key:
+///
+/// - terminal inline keys (`keylenx <= 8`) sort by length (shorter is a prefix
+///   and therefore smaller);
+/// - suffix keys (`KSUF`) sort after every terminal key with the same ikey,
+///   then by suffix bytes;
+/// - a layer pointer sorts after terminal keys with the same ikey and compares
+///   equal to a cursor with a real suffix (the caller must descend).
+#[inline]
+pub fn compare_cursor_to_slot<P>(
+    cursor_key: &CursorKey,
+    leaf: &LeafNode15<P>,
+    slot: usize,
+) -> Ordering
+where
+    P: LeafPolicy,
+{
+    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+
+    match cursor_key.current_ikey().cmp(&slot_ikey) {
+        Ordering::Less => return Ordering::Less,
+        Ordering::Greater => return Ordering::Greater,
+        Ordering::Equal => {}
+    }
+
+    let keylenx: u8 = leaf.keylenx_relaxed(slot);
+    let cursor_len: usize = cursor_key.current_len();
+
+    // Unshift sentinel: the cursor has already consumed this layer pointer.
+    // It must compare after any remaining terminal suffix siblings.
+    if cursor_len == crate::tree::range::cursor_key::UNSHIFT_SENTINEL_LEN {
+        return if keylenx >= LAYER_KEYLENX {
+            Ordering::Equal
+        } else {
+            Ordering::Greater
+        };
+    }
+
+    if keylenx >= LAYER_KEYLENX {
+        // Layer keys are strictly greater than the bare ikey. A cursor with a
+        // suffix may be anywhere inside the layer, so report Equal and let the
+        // caller descend.
+        if cursor_len > IKEY_SIZE {
+            Ordering::Equal
+        } else {
+            Ordering::Less
+        }
+    } else if keylenx == KSUF_KEYLENX {
+        if cursor_len <= IKEY_SIZE {
+            // Terminal cursor is a prefix of the longer key.
+            Ordering::Less
+        } else {
+            let stored: &[u8] = leaf.ksuf(slot).unwrap_or(&[]);
+            cursor_key.suffix().cmp(stored)
+        }
+    } else if cursor_len > IKEY_SIZE {
+        // Cursor has a suffix; every terminal key with the same ikey is
+        // smaller than it.
+        Ordering::Greater
+    } else {
+        cursor_len.cmp(&(keylenx as usize))
+    }
+}
+
+/// Find the first logical position whose full key is `>=` (or `>`) the cursor.
+///
+/// `skip_equal == true` means "first key strictly greater than the cursor";
+/// this is used once the cursor key has already been emitted. Otherwise the
+/// first key equal to the cursor is returned.
+#[inline]
+pub fn lower_bound_full<P>(
+    cursor_key: &CursorKey,
+    leaf: &LeafNode15<P>,
+    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    skip_equal: bool,
+) -> usize
+where
+    P: LeafPolicy,
+{
+    let size: usize = perm.size();
+
+    for i in 0..size {
+        let slot: usize = perm.get(i);
+
+        match compare_cursor_to_slot(cursor_key, leaf, slot) {
+            Ordering::Less => return i,
+            Ordering::Equal => return if skip_equal { i + 1 } else { i },
+            Ordering::Greater => {}
+        }
+    }
+
+    size
+}
+
+/// Find the last logical position whose full key is `<=` (or `<`) the cursor.
+///
+/// Returns `-1` when no slot is at or below the cursor.
+#[inline]
+pub fn upper_bound_reverse_full<P>(
+    cursor_key: &CursorKey,
+    leaf: &LeafNode15<P>,
+    perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+    include_equal: bool,
+) -> isize
+where
+    P: LeafPolicy,
+{
+    let size: usize = perm.size();
+    let mut best: isize = -1;
+
+    for i in 0..size {
+        let slot: usize = perm.get(i);
+        leaf.prefetch_value(slot);
+
+        match compare_cursor_to_slot(cursor_key, leaf, slot) {
+            // cursor > slot: the slot is at or below the bound.
+            Ordering::Greater => best = i.cast_signed(),
+            Ordering::Equal => {
+                if include_equal {
+                    best = i.cast_signed();
+                }
+            }
+            // cursor < slot: this and every later slot are above the bound.
+            Ordering::Less => break,
+        }
+    }
+
+    best
 }
 
 // ============================================================================
@@ -378,9 +518,11 @@ impl ReverseScanHelper {
         cursor_key.compare(ikey, keylenx as usize) != Ordering::Greater
     }
 
-    /// Find lower bound position for reverse scan.
+    /// Find the last position at or before the cursor for a reverse scan.
     ///
     /// When `upper_bound` is true, returns `size - 1` (start from last slot).
+    /// Otherwise performs a full-key upper-bound search so equal-ikey groups
+    /// (terminal keys, suffix keys, and layer pointers) are ordered correctly.
     ///
     /// # Returns
     ///
@@ -399,13 +541,7 @@ impl ReverseScanHelper {
             return perm.size().cast_signed() - 1;
         }
 
-        let kx: KeyIndexedPosition = lower_with_position(cursor_key, leaf, perm);
-
-        if kx.p.is_some() {
-            kx.i.cast_signed()
-        } else {
-            kx.i.cast_signed() - 1
-        }
+        upper_bound_reverse_full(cursor_key, leaf, perm, true)
     }
 }
 

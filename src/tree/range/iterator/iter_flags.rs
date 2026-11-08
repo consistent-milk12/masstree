@@ -21,6 +21,7 @@ impl ForwardFlags {
     const EMIT_EQUAL: u8 = 1 << 2;
     const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
     const SINGLE_LAYER_MODE: u8 = 1 << 4;
+    const CURSOR_EMITTED: u8 = 1 << 5;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -71,6 +72,15 @@ impl ForwardFlags {
     #[inline(always)]
     pub const fn single_layer_mode(self) -> bool {
         self.0 & Self::SINGLE_LAYER_MODE != 0
+    }
+
+    /// Whether the cursor key has already been emitted (or descended past).
+    ///
+    /// Before the first emission, advancing to a later leaf must use an
+    /// inclusive lower bound; after it, the lower bound must skip the cursor.
+    #[inline(always)]
+    pub const fn cursor_emitted(self) -> bool {
+        self.0 & Self::CURSOR_EMITTED != 0
     }
 
     // ========================================================================
@@ -127,6 +137,18 @@ impl ForwardFlags {
     #[inline(always)]
     pub const fn disable_single_layer_mode(&mut self) {
         self.0 &= !Self::SINGLE_LAYER_MODE;
+    }
+
+    /// Record that the cursor key is now the last emitted key.
+    #[inline(always)]
+    pub const fn mark_cursor_emitted(&mut self) {
+        self.0 |= Self::CURSOR_EMITTED;
+    }
+
+    /// Record that the cursor was reset to a fresh sublayer minimum.
+    #[inline(always)]
+    pub const fn clear_cursor_emitted(&mut self) {
+        self.0 &= !Self::CURSOR_EMITTED;
     }
 }
 

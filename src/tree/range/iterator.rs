@@ -765,6 +765,9 @@ where
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.fwd.flags.exhausted() {
+            // FusedIterator: once one direction is exhausted the whole
+            // double-ended iterator is exhausted.
+            self.mark_back_exhausted();
             return None;
         }
 
@@ -773,6 +776,7 @@ where
             self.initialize();
 
             if self.fwd.flags.exhausted() {
+                self.mark_back_exhausted();
                 return None;
             }
         }
@@ -798,7 +802,13 @@ where
             }
         }
 
-        self.advance()
+        let item: Option<Self::Item> = self.advance();
+
+        if item.is_none() {
+            self.mark_back_exhausted();
+        }
+
+        item
     }
 
     #[inline]
@@ -821,6 +831,7 @@ where
     fn next_back(&mut self) -> Option<Self::Item> {
         // Check if back cursor is exhausted
         if self.back_exhausted() {
+            self.fwd.flags.mark_exhausted();
             return None;
         }
 
@@ -829,6 +840,7 @@ where
             self.initialize_back();
 
             if self.back_exhausted() {
+                self.fwd.flags.mark_exhausted();
                 return None;
             }
         }
@@ -856,7 +868,13 @@ where
             }
         }
 
-        self.advance_back()
+        let item: Option<Self::Item> = self.advance_back();
+
+        if item.is_none() {
+            self.fwd.flags.mark_exhausted();
+        }
+
+        item
     }
 }
 

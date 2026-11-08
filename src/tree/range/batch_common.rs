@@ -447,6 +447,12 @@ where
             return D::bound_exceeded();
         }
 
+        // Validate after building the key and before exposing the value:
+        // the cached permutation can point at a slot reused by a writer.
+        if ctx.leaf.version().has_changed(ctx.cached_version) {
+            return D::version_changed();
+        }
+
         // Visit slot
         match slot_visitor.visit(ctx.leaf, slot, key) {
             None => {
@@ -479,6 +485,7 @@ where
 #[inline]
 pub fn process_batch_values<D, P>(
     ctx: &mut BatchCtx<'_, P>,
+    bound: &RangeBound<'_>,
     bound_ikey: Option<u64>,
     visitor: &mut impl FnMut(P::Output) -> bool,
     count: &mut usize,
@@ -499,8 +506,17 @@ where
 
         D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, &ctx.perm);
 
-        // Layer pointer check
+        // A layer pointer cannot be converted to a full key. Check its ikey
+        // against the bound *before* descending: a layer wholly outside the
+        // range must not contribute values. When the ikey equals the bound,
+        // the layer may still contain in-range continuations, so descend.
         if unlikely(slot_keylenx >= LAYER_KEYLENX) {
+            if let Some(b_ikey) = bound_ikey
+                && slot_ikey.cmp(&b_ikey) == D::exceeded_ordering()
+            {
+                return D::bound_exceeded();
+            }
+
             let layer_ptr: *mut u8 = ctx.leaf.load_layer_raw(slot);
             ctx.layer_stack
                 .push(LayerContext::new(ctx.root, ctx.leaf_ptr));
@@ -511,17 +527,25 @@ where
             return D::layer_encountered();
         }
 
-        // Fast bound check (ikey only)
-        if let Some(b_ikey) = bound_ikey
-            && slot_ikey.cmp(&b_ikey) == D::exceeded_ordering()
-        {
-            return D::bound_exceeded();
-        }
-
         // Empty value check
         if unlikely(ctx.leaf.is_value_empty_relaxed(slot)) {
             ctx.ki = D::step(ctx.ki);
             continue;
+        }
+
+        // Build the full key and perform the same bound check as keyed scans.
+        build_slot_key(ctx.cursor_key, ctx.leaf, slot, slot_ikey, slot_keylenx);
+        ctx.cursor_key.mark_key_complete();
+
+        let key: &[u8] = ctx.cursor_key.full_key();
+        if !D::key_in_bound(bound, key) {
+            return D::bound_exceeded();
+        }
+
+        // Validate before exposing the value: a slot can be reused after the
+        // cached permutation/version was captured.
+        if ctx.leaf.version().has_changed(ctx.cached_version) {
+            return D::version_changed();
         }
 
         D::on_pre_emit(flags);
@@ -530,6 +554,11 @@ where
             ctx.ki = D::step(ctx.ki);
             continue;
         };
+
+        // Validate again after the complete payload read.
+        if ctx.leaf.version().has_changed(ctx.cached_version) {
+            return D::version_changed();
+        }
 
         *count += 1;
         ctx.ki = D::step(ctx.ki);

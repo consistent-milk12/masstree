@@ -28,9 +28,7 @@ use super::batch_common::{
 use super::cursor_key::CursorDebugState;
 use super::cursor_key::CursorKey;
 use super::find::LeafBatchResult;
-use super::helper::{
-    KeyIndexedPosition, initial_ksuf_match, lower_with_position, lower_with_suffix,
-};
+use super::helper::{compare_cursor_to_slot, lower_bound_full, lower_with_suffix};
 use super::iterator::RangeBound;
 use super::iterator::iter_flags::ForwardFlags;
 use super::scan_state::{
@@ -251,88 +249,108 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         }
 
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
+        let size: usize = perm.size();
 
-        let kx: KeyIndexedPosition = lower_with_position(&self.cursor_key, leaf, &perm);
+        // Full-key lower bound: an equal-ikey group can contain several
+        // distinct keys (zero-padded terminals and longer suffix variants).
+        let pos: usize = lower_bound_full(&self.cursor_key, leaf, &perm, false);
+        let mut final_pos: usize = pos;
+        let mut emitted: bool = false;
 
-        let (next_state, snapshot) = match kx.p {
-            Some(slot) => Self::handle_initial_match(
-                leaf,
-                slot,
-                &mut self.cursor_key,
-                &mut self.stack,
-                emit_equal,
-                version,
-                &perm,
-                kx.i,
-            ),
-            None => (ScanState::FindNext, None),
+        let (next_state, snapshot) = if pos >= size {
+            (ScanState::FindNext, None)
+        } else {
+            let slot: usize = perm.get(pos);
+            let keylenx: u8 = leaf.keylenx_relaxed(slot);
+            let cmp: Ordering = compare_cursor_to_slot(&self.cursor_key, leaf, slot);
+
+            if cmp == Ordering::Greater {
+                // Defensive: the lower-bound search cannot land after the cursor.
+                final_pos = pos + 1;
+                (ScanState::FindNext, None)
+            } else if keylenx >= LAYER_KEYLENX {
+                // The first key at or after the cursor lives in this layer.
+                // The iterator shifts the cursor (following the user's suffix
+                // when present, otherwise to the sublayer minimum) on `Down`.
+                let slot_ikey: u64 = leaf.ikey_relaxed(slot);
+                let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+                self.cursor_key.assign_store_ikey(slot_ikey);
+                prefetch_read(layer_ptr);
+                self.stack.set_root(layer_ptr);
+                final_pos = pos + 1;
+                (ScanState::Down, None)
+            } else if cmp == Ordering::Equal {
+                final_pos = pos + 1;
+
+                if emit_equal {
+                    let snapshot =
+                        Self::emit_initial_slot(leaf, slot, keylenx, &mut self.cursor_key);
+                    emitted = snapshot.is_some();
+
+                    (
+                        if emitted {
+                            ScanState::Emit
+                        } else {
+                            ScanState::FindNext
+                        },
+                        snapshot,
+                    )
+                } else {
+                    (ScanState::FindNext, None)
+                }
+            } else {
+                // Cursor < slot: the scan is already positioned at this slot.
+                (ScanState::FindNext, None)
+            }
         };
 
         if leaf.version().has_changed(version) {
             return (ScanState::Retry, None);
         }
 
-        let final_pos = if kx.p.is_some() { kx.i + 1 } else { kx.i };
+        if emitted {
+            self.flags.mark_cursor_emitted();
+        } else {
+            self.flags.clear_cursor_emitted();
+        }
+
         self.stack.update_state(version, perm, final_pos);
 
         (next_state, snapshot)
     }
 
-    /// Handle an exact ikey match in `find_initial`.
-    #[expect(clippy::too_many_arguments, reason = "Internals")]
-    #[inline(always)]
-    fn handle_initial_match(
+    /// Build the snapshot for an exact initial match (including suffix keys).
+    #[inline]
+    fn emit_initial_slot(
         leaf: &LeafNode15<P>,
         slot: usize,
+        keylenx: u8,
         cursor_key: &mut CursorKey,
-        stack: &mut ScanStackElement<P>,
-        emit_equal: bool,
-        _version: u32,
-        _perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
-        _pos: usize,
-    ) -> (ScanState, Option<ScanSnapshot<P>>)
+    ) -> Option<ScanSnapshot<P>>
     where
         P::Output: Clone,
     {
-        let keylenx: u8 = leaf.keylenx_relaxed(slot);
+        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
 
-        if keylenx >= LAYER_KEYLENX {
-            let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
+        if keylenx == KSUF_KEYLENX {
+            let stored_suffix: &[u8] = leaf.ksuf(slot)?;
+            let key_len: usize = IKEY_SIZE + stored_suffix.len();
+            let output: P::Output = leaf.load_value(slot)?;
+
             cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(layer_ptr);
-            stack.set_root(layer_ptr);
-            return (ScanState::Down, None);
-        }
-
-        if keylenx == KSUF_KEYLENX
-            && let Some(stored_suffix) = leaf.ksuf(slot)
-        {
-            let cursor_suffix: &[u8] = cursor_key.suffix();
-            let cmp = stored_suffix.cmp(cursor_suffix);
-
-            if initial_ksuf_match(cmp, emit_equal)
-                && let Some(output) = leaf.load_value(slot)
-            {
-                let key_len = IKEY_SIZE + stored_suffix.len();
-                cursor_key.assign_store_ikey(leaf.ikey_relaxed(slot));
-                let _ = cursor_key.assign_store_suffix(stored_suffix);
-                cursor_key.assign_store_length(key_len);
-
-                return (ScanState::Emit, Some(ScanSnapshot::new(output, key_len)));
-            }
-            return (ScanState::FindNext, None);
-        }
-
-        if emit_equal && let Some(output) = leaf.load_value(slot) {
-            let key_len = keylenx as usize;
-            cursor_key.assign_store_ikey(leaf.ikey_relaxed(slot));
+            let _ = cursor_key.assign_store_suffix(stored_suffix);
             cursor_key.assign_store_length(key_len);
 
-            return (ScanState::Emit, Some(ScanSnapshot::new(output, key_len)));
-        }
+            Some(ScanSnapshot::new(output, key_len))
+        } else {
+            let key_len: usize = keylenx as usize;
+            let output: P::Output = leaf.load_value(slot)?;
 
-        (ScanState::FindNext, None)
+            cursor_key.assign_store_ikey(slot_ikey);
+            cursor_key.assign_store_length(key_len);
+
+            Some(ScanSnapshot::new(output, key_len))
+        }
     }
 }
 
@@ -406,6 +424,13 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::Retry, None);
         }
 
+        // A cached permutation can point at a slot that was reused for another
+        // key, or at a slot whose value/suffix changed. Revalidate before
+        // reading any slot data.
+        if leaf.version().has_changed(self.stack.version()) {
+            return (ScanState::Retry, None);
+        }
+
         let Some(slot) = self.stack.kp() else {
             return self.advance_leaf_generic::<E>(guard);
         };
@@ -419,18 +444,12 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         }
 
         if needs_duplicate_check {
-            let cmp: Ordering = self.cursor_key.compare(slot_ikey, slot_keylenx as usize);
-
-            let is_dup: bool = if likely(cmp == Ordering::Less) {
+            let is_dup: bool = if slot_keylenx >= LAYER_KEYLENX {
+                // A layer pointer is a routing entry, not a value; either the
+                // scan descends into it or it is already behind the cursor.
                 false
-            } else if cmp == Ordering::Greater {
-                true
-            } else if slot_keylenx == KSUF_KEYLENX && self.cursor_key.has_suffix() {
-                leaf.ksuf(slot).is_none_or(|stored_suffix| {
-                    self.cursor_key.compare_suffix(stored_suffix) != Ordering::Less
-                })
             } else {
-                true
+                compare_cursor_to_slot(&self.cursor_key, leaf, slot) != Ordering::Less
             };
 
             if is_dup {
@@ -452,21 +471,12 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
             if let Some(suffix) = leaf.ksuf(slot) {
-                let suffix_len: usize = suffix.len();
-                self.cursor_key.assign_store_ikey(slot_ikey);
-                let _ = self.cursor_key.assign_store_suffix(suffix);
-                self.cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
-                IKEY_SIZE + suffix_len
+                IKEY_SIZE + suffix.len()
             } else {
-                self.cursor_key.assign_store_ikey(slot_ikey);
-                self.cursor_key.assign_store_length(IKEY_SIZE);
                 IKEY_SIZE
             }
         } else {
-            let len: usize = slot_keylenx as usize;
-            self.cursor_key.assign_store_ikey(slot_ikey);
-            self.cursor_key.assign_store_length(len);
-            len
+            slot_keylenx as usize
         };
 
         let Some(snapshot) = E::emit_value(leaf, slot, key_len) else {
@@ -474,9 +484,26 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::FindNext, None);
         };
 
+        // Validate after the complete payload read and before publishing the
+        // key/cursor. Otherwise a reuse or layer conversion in this gap could
+        // emit a stale value or a layer pointer as a value.
+        if leaf.version().has_changed(self.stack.version()) {
+            return (ScanState::Retry, None);
+        }
+
+        self.cursor_key.assign_store_ikey(slot_ikey);
+
+        if slot_keylenx == KSUF_KEYLENX
+            && let Some(suffix) = leaf.ksuf(slot)
+        {
+            let _ = self.cursor_key.assign_store_suffix(suffix);
+        }
+
+        self.cursor_key.assign_store_length(key_len);
         self.cursor_key.mark_key_complete();
         self.stack.set_last_ikey(slot_ikey);
         self.stack.next();
+        self.flags.mark_cursor_emitted();
 
         (ScanState::Emit, Some(snapshot))
     }
@@ -527,8 +554,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         }
 
         if needs_duplicate_check {
-            let cmp: Ordering = self.cursor_key.compare(slot_ikey, slot_keylenx as usize);
-            let is_dup: bool = !likely(cmp == Ordering::Less);
+            let is_dup: bool = if slot_keylenx >= LAYER_KEYLENX {
+                false
+            } else {
+                compare_cursor_to_slot(&self.cursor_key, leaf, slot) != Ordering::Less
+            };
 
             if is_dup {
                 self.stack.next();
@@ -559,6 +589,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::FindNext, None);
         }
 
+        // Validate after the pointer/value read and before publishing it.
+        if leaf.version().has_changed(version) {
+            return (ScanState::Retry, None);
+        }
+
         let key_len: usize = slot_keylenx as usize;
         self.cursor_key.assign_store_ikey(slot_ikey);
         self.cursor_key.assign_store_length(key_len);
@@ -566,6 +601,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         self.stack.set_last_ikey(slot_ikey);
         self.stack.next();
+        self.flags.mark_cursor_emitted();
 
         (
             ScanState::Emit,
@@ -622,7 +658,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
 
-        let pos: usize = lower_with_suffix(&self.cursor_key, next_leaf, &perm);
+        // Before the first emission the cursor is still the *start* key, so an
+        // exact match must be included when the bound is inclusive. After an
+        // emission the cursor is the last emitted key and must be skipped.
+        let skip_equal: bool = self.flags.cursor_emitted() || !self.flags.emit_equal();
+        let pos: usize = lower_bound_full(&self.cursor_key, next_leaf, &perm, skip_equal);
 
         self.stack.update_state(next_version, perm, pos);
 
@@ -694,7 +734,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = next_leaf.permutation();
 
-        let pos: usize = lower_with_suffix(&self.cursor_key, next_leaf, &perm);
+        let skip_equal: bool = self.flags.cursor_emitted() || !self.flags.emit_equal();
+        let pos: usize = lower_bound_full(&self.cursor_key, next_leaf, &perm, skip_equal);
 
         self.stack.update_state(next_version, perm, pos);
 
@@ -725,7 +766,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
-        let pos: usize = lower_with_suffix(&self.cursor_key, leaf, &perm);
+        let skip_equal: bool = self.flags.cursor_emitted() || !self.flags.emit_equal();
+        let pos: usize = lower_bound_full(&self.cursor_key, leaf, &perm, skip_equal);
 
         self.stack.update_state(version, perm, pos);
 
@@ -737,6 +779,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     /// Corresponds to `find::handle_down`.
     pub fn handle_down(&mut self) {
         self.cursor_key.shift_clear();
+        self.flags.clear_cursor_emitted();
         self.stack.set_last_ikey(0);
     }
 
@@ -761,8 +804,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         let version: u32 = leaf.version().stable();
         let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
 
-        let pos: usize = lower_with_suffix(&self.cursor_key, leaf, &perm);
+        // The unshift sentinel sorts after the layer pointer; skip it and any
+        // earlier terminal siblings with the same ikey.
+        let pos: usize = lower_bound_full(&self.cursor_key, leaf, &perm, true);
         self.stack.update_state(version, perm, pos);
+        self.flags.mark_cursor_emitted();
 
         self.stack.set_last_ikey(0);
 
@@ -870,6 +916,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     #[inline]
     pub fn process_leaf_batch_values(
         &mut self,
+        end_bound: &RangeBound<'_>,
         end_bound_ikey: Option<u64>,
         visitor: &mut impl FnMut(P::Output) -> bool,
         count: &mut usize,
@@ -878,6 +925,7 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             let mut ctx = self.build_batch_ctx();
             let r = process_batch_values::<Forward, P>(
                 &mut ctx,
+                end_bound,
                 end_bound_ikey,
                 visitor,
                 count,
@@ -1287,14 +1335,18 @@ where
     fn emit_initial(
         &mut self,
         ctx: &mut ForwardScanCtx<P>,
-        _end_bound: &RangeBound<'_>,
+        end_bound: &RangeBound<'_>,
         count: &mut usize,
     ) -> BatchAction {
         let Some(snapshot) = ctx.snapshot.take() else {
             return BatchAction::Continue;
         };
 
-        // Values-only: approximate ikey-based end bound checking only
+        let key: &[u8] = unsafe { ctx.cursor_key.full_key_unchecked() };
+        if !end_bound.contains(key) {
+            return BatchAction::Exhausted;
+        }
+
         *count += 1;
 
         if (self.visitor)(snapshot.value) {
@@ -1308,7 +1360,7 @@ where
     fn dup_check_entry(
         &mut self,
         ctx: &mut ForwardScanCtx<P>,
-        _end_bound: &RangeBound<'_>,
+        end_bound: &RangeBound<'_>,
         guard: &LocalGuard<'_>,
         count: &mut usize,
     ) -> BatchAction {
@@ -1318,7 +1370,11 @@ where
         if new_state == ScanState::Emit
             && let Some(snap) = snapshot
         {
-            // Values-only: skip end bound key check
+            let key: &[u8] = unsafe { ctx.cursor_key.full_key_unchecked() };
+            if !end_bound.contains(key) {
+                return BatchAction::Exhausted;
+            }
+
             *count += 1;
 
             ctx.state = ScanState::FindNext;
@@ -1342,7 +1398,7 @@ where
         // trie depth so descended scans compare sublayer ikeys correctly.
         let end_bound_ikey: Option<u64> = end_bound.extract_ikey_at(ctx.cursor_key.offset());
 
-        ctx.process_leaf_batch_values(end_bound_ikey, self.visitor, count)
+        ctx.process_leaf_batch_values(end_bound, end_bound_ikey, self.visitor, count)
     }
 }
 
