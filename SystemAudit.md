@@ -1928,6 +1928,15 @@ four-key NUL case and the `abcdefgh`/`abcdefghX` case.
 **Severity:** High · **Confidence:** Confirmed (iterator and batch)  
 **Legacy IDs:** `BUG-RNG-03`, independent `repros`
 
+**Proposal follow-up:** The earlier guard against terminal end bounds also
+skipped layers under *earlier* prefixes. The extended `range --bin promoted`
+probe returned zero rather than 40 keys for end `Included("ZZZZZZZZ")`.
+Initial descent now skips only a same-prefix layer above a terminal bound,
+compares prefixes before changing the cursor, and captures the layer pointer
+through `try_snapshot_slot` before any cursor/stack mutation. A stale-version
+unit regression and iterator/keyed/reference/values reverse-bound regressions
+pass natively and under Miri. Historical defect details follow.
+
 **Location:** `src/tree/range/reverse_ctx.rs:266-277`
 (`try_initial_position_reverse`), `:346-354`
 (`handle_layer_descent_reverse`), `:399-402` (`try_emit_slot_reverse`).

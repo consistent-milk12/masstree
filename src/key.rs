@@ -30,6 +30,15 @@ pub struct Key<'a> {
     suffix_start: usize,
 }
 
+/// Compare chunk metadata, treating every suffix/layer length as one long-key
+/// category. Full suffix bytes are compared separately after an equal result.
+#[inline(always)]
+pub fn compare_ikey_keylenx(a_ikey: u64, a_len: usize, b_ikey: u64, b_len: usize) -> Ordering {
+    a_ikey
+        .cmp(&b_ikey)
+        .then_with(|| a_len.min(IKEY_SIZE + 1).cmp(&b_len.min(IKEY_SIZE + 1)))
+}
+
 impl<'a> Key<'a> {
     /// Create a new key from a byte slice.
     ///
@@ -230,23 +239,7 @@ impl<'a> Key<'a> {
     #[must_use]
     #[inline(always)]
     pub fn compare(&self, other_ikey: u64, keylenx: usize) -> Ordering {
-        match self.ikey.cmp(&other_ikey) {
-            Ordering::Equal => {}
-
-            ord => return ord,
-        }
-
-        let self_len: usize = self.current_len();
-
-        if self_len > IKEY_SIZE {
-            if keylenx <= IKEY_SIZE {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        } else {
-            self_len.cmp(&keylenx)
-        }
+        compare_ikey_keylenx(self.ikey, self.current_len(), other_ikey, keylenx)
     }
 
     /// Get the full key data.

@@ -8,9 +8,8 @@ use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
-use crate::key::IKEY_SIZE;
+use crate::leaf15::LAYER_KEYLENX;
 use crate::leaf15::LeafNode15;
-use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::nodeversion::NodeVersion;
 use crate::policy::LeafPolicy;
 use crate::prefetch::prefetch_read;
@@ -20,14 +19,20 @@ use super::batch_common::{
 };
 use super::cursor_key::CursorKey;
 use super::find_rev::LeafBatchResultBack;
-use super::helper::{CloneEmitter, PtrEmitter, ScanEmitter};
-use super::helper::{ReverseScanHelper, compare_cursor_to_slot};
+use super::helper::ReverseScanHelper;
+use super::helper::{
+    CloneEmitter, PtrEmitter, ScanEmitter, SlotPayload, build_slot_key_parts,
+    compare_cursor_to_parts, try_snapshot_slot,
+};
 use super::iterator::RangeBound;
 use super::iterator::iter_flags::ReverseFlags;
 use super::scan_state::{
     BackStackElement, LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr, ScanStateBack,
 };
 use super::traversal::reach_leaf_for_scan;
+
+#[cfg(test)]
+mod unit_tests;
 
 // ============================================================================
 //  Internal result types (moved from find_rev.rs)
@@ -44,24 +49,8 @@ enum InitialPositionResult<P: LeafPolicy> {
     /// No match at current position, retreat to find previous.
     FindPrev,
 
-    #[expect(dead_code, reason = "Reserved for future use")]
-    /// Layer is empty or exhausted, ascend.
-    Up,
-
     /// Version conflict, retry from root.
     Retry,
-}
-
-enum EmitResult<P: LeafPolicy> {
-    /// Successfully prepared snapshot for emission.
-    Emit(ScanSnapshot<P>),
-
-    /// Entry doesn't match criteria (wrong suffix, null value, etc.).
-    /// Caller should continue searching.
-    NoMatch,
-
-    /// Version changed during read, need retry from root.
-    VersionChanged,
 }
 
 // ============================================================================
@@ -244,10 +233,6 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                         return (ScanStateBack::FindPrev, None);
                     }
 
-                    InitialPositionResult::Up => {
-                        return (ScanStateBack::Up, None);
-                    }
-
                     InitialPositionResult::Retry => {
                         return (ScanStateBack::Retry, None);
                     }
@@ -279,209 +264,57 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             self.flags.upper_bound(),
         );
 
-        // Check if position is valid: ki must be in [0, size)
         if !(ki >= 0 && ki.cast_unsigned() < size) {
-            // Position is -1 or beyond size, need to retreat
+            if leaf.version().has_changed(version) {
+                return InitialPositionResult::Retry;
+            }
             self.stack.update_state(version, perm, ki);
             return InitialPositionResult::FindPrev;
         }
-
-        let slot: usize = perm.get(ki.cast_unsigned());
-        let keylenx: u8 = leaf.keylenx_relaxed(slot);
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-        // Handle layer pointer - must descend
-        if keylenx >= LAYER_KEYLENX {
-            return self.handle_layer_descent_reverse(
-                current_root,
-                leaf_ptr,
-                slot,
-                slot_ikey,
-                version,
-                perm,
-                ki,
-                leaf,
-            );
-        }
-
-        // Try to emit this slot
-        match Self::try_emit_slot_reverse(
-            leaf,
-            slot,
-            slot_ikey,
-            keylenx,
-            version,
-            perm,
-            ki,
-            &mut self.cursor_key,
-            &mut self.stack,
-            emit_equal,
-            self.flags.upper_bound(),
-        ) {
-            EmitResult::Emit(snapshot) => InitialPositionResult::Emit(snapshot),
-
-            EmitResult::NoMatch => {
-                // Entry doesn't match, update position and retreat
-                self.stack.update_state(version, perm, ki - 1);
-                InitialPositionResult::FindPrev
-            }
-
-            EmitResult::VersionChanged => {
-                // Version conflict - must retry from root
-                InitialPositionResult::Retry
-            }
-        }
-    }
-
-    /// Set up layer descent for reverse scan.
-    ///
-    /// Pushes parent context to layer stack, updates cursor, and returns
-    /// the sublayer root for the caller to continue the loop.
-    ///
-    /// # Critical: Initial Descent Distinction
-    ///
-    /// - If cursor has suffix: use `shift()` to follow user's end bound
-    /// - If no suffix: use `shift_clear_reverse()` to scan entire sublayer from max
-    #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    fn handle_layer_descent_reverse(
-        &mut self,
-        current_root: *const u8,
-        leaf_ptr: *mut LeafNode15<P>,
-        slot: usize,
-        slot_ikey: u64,
-        version: u32,
-        perm: Permuter15,
-        ki: isize,
-        leaf: &LeafNode15<P>,
-    ) -> InitialPositionResult<P>
-    where
-        P::Output: Clone,
-    {
-        // If the end key ends at or before this chunk boundary, every key in
-        // the layer is greater than the bound. Do not descend; retreat in the
-        // parent instead. `upper_bound` (unbounded end) and a real remaining
-        // suffix are the only reasons to enter the sublayer.
-        if !self.flags.upper_bound() && !self.cursor_key.has_suffix() {
-            self.stack.update_state(version, perm, ki - 1);
-            return InitialPositionResult::FindPrev;
-        }
-
-        // Push parent context for return
-        self.layer_stack
-            .push(LayerContext::new(current_root, leaf_ptr));
-
-        self.cursor_key.assign_store_ikey(slot_ikey);
-        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-
-        // Prefetch layer root before descending (hide memory latency)
-        prefetch_read(layer_ptr);
-
-        // Update position to before layer pointer for when we return
+        let Ok(slot) =
+            try_snapshot_slot::<P, CloneEmitter>(leaf, perm.get(ki.cast_unsigned()), version)
+        else {
+            return InitialPositionResult::Retry;
+        };
+        // All cursor/stack changes follow validation, including layer descent.
         self.stack.update_state(version, perm, ki - 1);
-
-        // Initial descent distinction:
-        // - same prefix with a real suffix: follow the end bound downward.
-        // - different prefix (or no suffix): scan the whole sublayer from max.
-        let same_prefix: bool = slot_ikey == self.cursor_key.current_ikey();
-        let real_suffix: bool =
-            self.cursor_key.has_suffix() && !self.cursor_key.is_unshift_sentinel();
-
-        if same_prefix && real_suffix {
-            self.cursor_key.shift();
-            self.flags.clear_upper_bound();
-        } else {
-            self.cursor_key.shift_clear_reverse();
-            self.flags.set_upper_bound();
-        }
-
-        // Return layer pointer for iterative descent
-        InitialPositionResult::LayerDescent(layer_ptr.cast_const())
-    }
-
-    /// Try to emit a slot value for reverse scan.
-    ///
-    /// Handles both suffix keys (`KSUF_KEYLENX`) and inline keys (0-8).
-    #[inline]
-    #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    fn try_emit_slot_reverse(
-        leaf: &LeafNode15<P>,
-        slot: usize,
-        slot_ikey: u64,
-        keylenx: u8,
-        version: u32,
-        perm: Permuter15,
-        ki: isize,
-        cursor_key: &mut CursorKey,
-        stack: &mut BackStackElement<P>,
-        emit_equal: bool,
-        upper_bound: bool,
-    ) -> EmitResult<P>
-    where
-        P::Output: Clone,
-    {
-        leaf.prefetch_value(slot);
-
-        // Full-key comparison: a scan-global `emit_equal` must not suppress an
-        // earlier, unrelated key that happens to share the bound's ikey.
-        if !upper_bound {
-            match compare_cursor_to_slot(cursor_key, leaf, slot) {
-                // cursor < slot: the slot is above the reverse bound.
-                Ordering::Less => return EmitResult::NoMatch,
-                Ordering::Equal if !emit_equal => return EmitResult::NoMatch,
-                Ordering::Greater | Ordering::Equal => {}
+        match slot.payload {
+            SlotPayload::Layer(root) => {
+                let same_prefix = slot.ikey == self.cursor_key.current_ikey();
+                let real_suffix =
+                    self.cursor_key.has_suffix() && !self.cursor_key.is_unshift_sentinel();
+                // A terminal bound excludes only a layer with the SAME prefix.
+                // Earlier prefixes are entirely below the end bound.
+                if same_prefix && !self.flags.upper_bound() && !real_suffix {
+                    return InitialPositionResult::FindPrev;
+                }
+                self.layer_stack
+                    .push(LayerContext::new(current_root, leaf_ptr));
+                self.cursor_key.assign_store_ikey(slot.ikey);
+                prefetch_read(root);
+                if same_prefix && real_suffix {
+                    self.cursor_key.shift();
+                    self.flags.clear_upper_bound();
+                } else {
+                    self.cursor_key.shift_clear_reverse();
+                    self.flags.set_upper_bound();
+                }
+                InitialPositionResult::LayerDescent(root.cast_const())
             }
-        }
-
-        if leaf.is_value_empty_relaxed(slot) {
-            return EmitResult::NoMatch;
-        }
-
-        // Snapshot the suffix and value first; commit the cursor only after
-        // the OCC validation below. Reading after validation and then writing
-        // the cursor would expose a slot that a writer may have reused.
-        let suffix: Option<&[u8]> = if keylenx == KSUF_KEYLENX {
-            leaf.ksuf(slot)
-        } else {
-            None
-        };
-
-        let key_len: usize = if keylenx == KSUF_KEYLENX {
-            suffix.map_or(IKEY_SIZE, |s| IKEY_SIZE + s.len())
-        } else {
-            #[expect(clippy::cast_possible_truncation, reason = "Known const")]
-            let len: usize = std::cmp::min(keylenx, IKEY_SIZE as u8) as usize;
-            len
-        };
-
-        let Some(output) = leaf.load_value(slot) else {
-            // Concurrent modification removed value between the empty check
-            // and the load; retry if the snapshot is stale.
-            if leaf.version().has_changed(version) {
-                return EmitResult::VersionChanged;
+            SlotPayload::Value(snapshot) => {
+                let cmp =
+                    compare_cursor_to_parts(&self.cursor_key, slot.ikey, slot.keylenx, slot.suffix);
+                if !self.flags.upper_bound()
+                    && (cmp == Ordering::Less || (cmp == Ordering::Equal && !emit_equal))
+                {
+                    return InitialPositionResult::FindPrev;
+                }
+                build_slot_key_parts(&mut self.cursor_key, slot.ikey, slot.keylenx, slot.suffix);
+                self.cursor_key.mark_key_complete();
+                InitialPositionResult::Emit(snapshot)
             }
-
-            return EmitResult::NoMatch;
-        };
-
-        // Validate after the complete payload/suffix read.
-        if leaf.version().has_changed(version) {
-            return EmitResult::VersionChanged;
+            SlotPayload::Empty => InitialPositionResult::FindPrev,
         }
-
-        cursor_key.assign_store_ikey(slot_ikey);
-
-        if let Some(suffix) = suffix {
-            let _ = cursor_key.assign_store_suffix(suffix);
-        }
-
-        cursor_key.assign_store_length(key_len);
-
-        stack.update_state(version, perm, ki - 1);
-
-        EmitResult::Emit(ScanSnapshot {
-            value: output,
-            key_len,
-        })
     }
 }
 
@@ -599,194 +432,65 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         ki: isize,
         needs_duplicate_check: bool,
     ) -> (ScanStateBack, Option<E::Snapshot>) {
-        let slot: usize = perm.get(ki.unsigned_abs());
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let keylenx: u8 = leaf.keylenx_relaxed(slot);
-
-        // Reverse: ikeys should be non-increasing within a leaf
-        if slot_ikey > self.stack.last_ikey() {
+        let physical_slot = perm.get(ki.cast_unsigned());
+        let Ok(slot) = try_snapshot_slot::<P, E>(leaf, physical_slot, version) else {
+            return (ScanStateBack::Retry, None);
+        };
+        if slot.ikey > self.stack.last_ikey() {
             return (ScanStateBack::Retry, None);
         }
-
-        // Prefetch next slot's data to hide memory latency
-        // For reverse scan, "next" is ki-1
         if ki > 0 {
-            let next_slot: usize = perm.get((ki - 1).unsigned_abs());
-            leaf.prefetch_value(next_slot);
+            leaf.prefetch_value(perm.get((ki - 1).cast_unsigned()));
         }
-
-        // Check for duplicate only when needed (after Retry). Use the full key
-        // so an earlier suffix variant with the same ikey is not skipped, and
-        // do not skip a layer pointer that still needs to be descended.
         if needs_duplicate_check && !self.flags.upper_bound() {
-            let sentinel: bool = self.cursor_key.is_unshift_sentinel();
-            let cursor_ikey: u64 = self.cursor_key.current_ikey();
-            let is_dup: bool = if keylenx >= LAYER_KEYLENX {
+            let sentinel = self.cursor_key.is_unshift_sentinel();
+            let cursor_ikey = self.cursor_key.current_ikey();
+            let is_dup = if slot.keylenx >= LAYER_KEYLENX {
                 if sentinel {
-                    // Only the layer we just finished is processed. A
-                    // different layer pointer below the cursor must still be
-                    // descended into.
-                    slot_ikey == cursor_ikey
+                    slot.ikey == cursor_ikey
                 } else {
-                    // A layer at or above the cursor was already covered.
-                    slot_ikey >= cursor_ikey
+                    slot.ikey >= cursor_ikey
                 }
             } else if sentinel {
-                // A positional marker, not a real last-emitted key: earlier
-                // terminal siblings (e.g. the exact chunk-boundary key) must
-                // still be emitted.
                 false
             } else {
-                // Duplicate when the slot is at or above the last emitted key.
-                // (Cursor < slot and cursor == slot were already emitted;
-                // cursor > slot is the next key to emit in reverse.)
-                compare_cursor_to_slot(&self.cursor_key, leaf, slot) != Ordering::Greater
+                compare_cursor_to_parts(&self.cursor_key, slot.ikey, slot.keylenx, slot.suffix)
+                    != Ordering::Greater
             };
-
             if is_dup {
                 self.stack.set_ki(ReverseScanHelper::prev(ki));
                 return (ScanStateBack::FindPrev, None);
             }
         }
-
-        // Handle layer pointer
-        if keylenx >= LAYER_KEYLENX {
-            return self.handle_layer_pointer_generic::<E>(
-                leaf, leaf_ptr, slot, slot_ikey, version, perm, ki,
-            );
-        }
-
-        // Try to emit this slot's value
-        self.try_emit_generic::<E>(leaf, slot, slot_ikey, keylenx, version, perm, ki)
-    }
-
-    /// Handle a layer pointer during reverse scan (`find_prev` path).
-    #[inline]
-    #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    fn handle_layer_pointer_generic<E: ScanEmitter<P>>(
-        &mut self,
-        leaf: &LeafNode15<P>,
-        leaf_ptr: *mut LeafNode15<P>,
-        slot: usize,
-        slot_ikey: u64,
-        version: u32,
-        perm: Permuter15,
-        ki: isize,
-    ) -> (ScanStateBack, Option<E::Snapshot>) {
-        // Load the layer pointer first and validate before pushing the parent
-        // context or mutating the cursor: the slot may have been converted
-        // back to a value by a concurrent update.
-        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-
-        if leaf.version().has_changed(version) {
-            return (ScanStateBack::Retry, None);
-        }
-
-        // Record whether this layer shares the cursor's prefix before
-        // overwriting the cursor ikey.
-        let same_prefix: bool = slot_ikey == self.cursor_key.current_ikey();
-        let real_suffix: bool =
-            self.cursor_key.has_suffix() && !self.cursor_key.is_unshift_sentinel();
-        self.flags
-            .set_down_mode(same_prefix && real_suffix, !same_prefix);
-
-        // Push current context to layer stack for return
-        self.layer_stack
-            .push(LayerContext::new(self.stack.get_root(), leaf_ptr));
-
-        // Update cursor with layer pointer's ikey
-        self.cursor_key.assign_store_ikey(slot_ikey);
-
-        // Get layer root and prefetch
-        prefetch_read(layer_ptr);
-
-        // Update stack for sublayer (ki-1 for when we return)
-        self.stack.set_root(layer_ptr.cast_const());
-        self.stack
-            .update_state(version, perm, ReverseScanHelper::prev(ki));
-
-        // Return Down state - iterator will call handle_down_back then find_initial_reverse
-        (ScanStateBack::Down, None)
-    }
-
-    /// Try to emit a value slot during reverse scan (`find_prev` path).
-    ///
-    /// Generic over emission strategy `E`. Calls `helper.mark_key_complete()`
-    /// on successful emission to clear the `upper_bound` flag.
-    #[inline]
-    #[expect(clippy::too_many_arguments, reason = "Internal helper")]
-    fn try_emit_generic<E: ScanEmitter<P>>(
-        &mut self,
-        leaf: &LeafNode15<P>,
-        slot: usize,
-        slot_ikey: u64,
-        keylenx: u8,
-        version: u32,
-        perm: Permuter15,
-        ki: isize,
-    ) -> (ScanStateBack, Option<E::Snapshot>) {
-        leaf.prefetch_value(slot);
-
-        if leaf.is_value_empty_relaxed(slot) {
-            if leaf.version().has_changed(version) {
-                return (ScanStateBack::Retry, None);
+        match slot.payload {
+            SlotPayload::Layer(root) => {
+                let same_prefix = slot.ikey == self.cursor_key.current_ikey();
+                let real_suffix =
+                    self.cursor_key.has_suffix() && !self.cursor_key.is_unshift_sentinel();
+                self.flags
+                    .set_down_mode(same_prefix && real_suffix, !same_prefix);
+                self.layer_stack
+                    .push(LayerContext::new(self.stack.get_root(), leaf_ptr));
+                self.cursor_key.assign_store_ikey(slot.ikey);
+                prefetch_read(root);
+                self.stack.set_root(root.cast_const());
+                self.stack.update_state(version, perm, ki - 1);
+                (ScanStateBack::Down, None)
             }
-
-            self.stack.set_ki(ReverseScanHelper::prev(ki));
-            return (ScanStateBack::FindPrev, None);
-        }
-
-        // Snapshot suffix and value first; commit the cursor only after OCC
-        // validation. A writer may have reused this slot in the meantime.
-        let suffix: Option<&[u8]> = if keylenx == KSUF_KEYLENX {
-            leaf.ksuf(slot)
-        } else {
-            None
-        };
-
-        let key_len: usize = if keylenx == KSUF_KEYLENX {
-            suffix.map_or(IKEY_SIZE, |s| IKEY_SIZE + s.len())
-        } else {
-            #[expect(clippy::cast_possible_truncation, reason = "Known const")]
-            let len: usize = std::cmp::min(keylenx, IKEY_SIZE as u8) as usize;
-            len
-        };
-
-        let Some(snapshot) = E::emit_value(leaf, slot, key_len) else {
-            if leaf.version().has_changed(version) {
-                return (ScanStateBack::Retry, None);
+            SlotPayload::Empty => {
+                self.stack.set_ki(ReverseScanHelper::prev(ki));
+                (ScanStateBack::FindPrev, None)
             }
-
-            self.stack.set_ki(ReverseScanHelper::prev(ki));
-            return (ScanStateBack::FindPrev, None);
-        };
-
-        // Validate after the complete payload read and before publishing the
-        // key/cursor.
-        if leaf.version().has_changed(version) {
-            return (ScanStateBack::Retry, None);
+            SlotPayload::Value(snapshot) => {
+                build_slot_key_parts(&mut self.cursor_key, slot.ikey, slot.keylenx, slot.suffix);
+                self.cursor_key.mark_key_complete();
+                self.flags.clear_upper_bound();
+                self.flags.mark_cursor_emitted();
+                self.stack.set_last_ikey(slot.ikey);
+                self.stack.set_ki(ReverseScanHelper::prev(ki));
+                (ScanStateBack::Emit, Some(snapshot))
+            }
         }
-
-        self.cursor_key.assign_store_ikey(slot_ikey);
-
-        if let Some(suffix) = suffix {
-            let _ = self.cursor_key.assign_store_suffix(suffix);
-        }
-
-        self.cursor_key.assign_store_length(key_len);
-
-        // CRITICAL: Clear upper_bound after successful emission.
-        self.flags.clear_upper_bound();
-        self.flags.mark_cursor_emitted();
-
-        // Update cached ikey for monotonicity check
-        self.stack.set_last_ikey(slot_ikey);
-
-        // Update position for next iteration
-        self.stack
-            .update_state(version, perm, ReverseScanHelper::prev(ki));
-
-        (ScanStateBack::Emit, Some(snapshot))
     }
 }
 
@@ -1123,208 +827,6 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         self.stack.update_state(version, perm, ki);
 
         true
-    }
-}
-
-// ============================================================================
-//  Single-Layer Fast Path for Reverse Scan
-// ============================================================================
-
-impl<P: LeafPolicy> ReverseScanCtx<P> {
-    /// Fast path for reverse iteration on single-layer trees (keys <= 8 bytes).
-    ///
-    /// Skips layer pointer handling, suffix comparisons, and layer stack operations.
-    #[inline]
-    #[expect(clippy::cast_possible_truncation)]
-    pub(crate) fn find_prev_single_layer(
-        &mut self,
-        guard: &LocalGuard<'_>,
-        needs_duplicate_check: bool,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>)
-    where
-        P::Output: Clone,
-    {
-        // Check for null leaf
-        let leaf_ptr: *mut LeafNode15<P> = self.stack.get_leaf_ptr();
-        if leaf_ptr.is_null() {
-            return (ScanStateBack::FindPrev, None);
-        }
-
-        let ki: isize = self.stack.get_ki();
-
-        // Fast path: leaf exhausted (ki went negative)
-        if ki < 0 {
-            return self.advance_prev_leaf_single_layer_snapshot(guard);
-        }
-
-        // SAFETY: leaf_ptr is valid (null checked above)
-        let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-        let version: u32 = self.stack.get_version();
-
-        // Check if leaf was concurrently modified since we cached the version.
-        // This matches forward's discipline in find_next_single_layer_ptr.
-        if leaf.version().has_changed(version) {
-            return (ScanStateBack::Retry, None);
-        }
-
-        let perm: Permuter15 = *self.stack.get_perm_ref();
-        let perm_size: usize = perm.size();
-
-        // Defensive: ki might be >= size due to concurrent deletion
-        if ki.unsigned_abs() >= perm_size {
-            return self.advance_prev_leaf_single_layer_snapshot(guard);
-        }
-
-        // Get current slot
-        let slot: usize = perm.get(ki.unsigned_abs());
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
-
-        // Reverse: ikeys should be non-increasing within a leaf
-        if slot_ikey > self.stack.last_ikey() {
-            return (ScanStateBack::Retry, None);
-        }
-
-        // Check for duplicate only when needed (after Retry), using full-key
-        // order so earlier variants with the same ikey are still emitted.
-        if needs_duplicate_check
-            && !self.flags.upper_bound()
-            && compare_cursor_to_slot(&self.cursor_key, leaf, slot) != Ordering::Greater
-        {
-            self.stack.set_ki(ki - 1);
-            return (ScanStateBack::FindPrev, None);
-        }
-
-        // Single-layer mode only handles inline keys (0..=8).
-        // This returns Down for BOTH suffix keys (KSUF_KEYLENX=64) and layer pointers
-        // (LAYER_KEYLENX=128). The caller (iterator.rs) handles Down by disabling
-        // single-layer mode and re-processing via the multi-layer path — it does NOT
-        // dereference the slot as a layer pointer, so this is safe for KSUF.
-        if slot_keylenx > IKEY_SIZE as u8 {
-            return (ScanStateBack::Down, None);
-        }
-
-        // Value slot - snapshot before validation, commit cursor after.
-        leaf.prefetch_value(slot);
-
-        if leaf.is_value_empty_relaxed(slot) {
-            if leaf.version().has_changed(version) {
-                return (ScanStateBack::Retry, None);
-            }
-
-            self.stack.set_ki(ki - 1);
-            return (ScanStateBack::FindPrev, None);
-        }
-
-        // Inline keys have keylenx 0-8 representing the actual length.
-        let key_len: usize = slot_keylenx as usize;
-        let Some(output) = leaf.load_value(slot) else {
-            if leaf.version().has_changed(version) {
-                return (ScanStateBack::Retry, None);
-            }
-
-            return (ScanStateBack::FindPrev, None);
-        };
-
-        // Validate after the complete value read.
-        if leaf.version().has_changed(version) {
-            return (ScanStateBack::Retry, None);
-        }
-
-        self.cursor_key.assign_store_ikey(slot_ikey);
-        self.cursor_key.assign_store_length(key_len);
-        self.cursor_key.mark_key_complete();
-
-        // Clear upper_bound after successful emit
-        self.flags.clear_upper_bound();
-
-        // The cursor now holds this emitted key.
-        self.flags.mark_cursor_emitted();
-
-        // Update cached ikey for monotonicity check
-        self.stack.set_last_ikey(slot_ikey);
-
-        // Advance position for next call (go backwards)
-        self.stack.set_ki(ki - 1);
-
-        (
-            ScanStateBack::Emit,
-            Some(ScanSnapshot {
-                value: output,
-                key_len,
-            }),
-        )
-    }
-
-    /// Advance to previous leaf in single-layer mode (snapshot version).
-    #[inline(always)]
-    fn advance_prev_leaf_single_layer_snapshot(
-        &mut self,
-        guard: &LocalGuard<'_>,
-    ) -> (ScanStateBack, Option<ScanSnapshot<P>>) {
-        let leaf_ptr: *mut LeafNode15<P> = self.stack.get_leaf_ptr();
-
-        if leaf_ptr.is_null() {
-            return (ScanStateBack::FindPrev, None);
-        }
-
-        let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-        let version: u32 = self.stack.get_version();
-
-        // Check if version changed (concurrent modification)
-        if leaf.version().has_changed(version) {
-            return (ScanStateBack::Retry, None);
-        }
-
-        // Update cursor with current leaf's bound before moving
-        let ikey_bound: u64 = leaf.ikey_bound();
-        self.cursor_key.assign_store_ikey(ikey_bound);
-        self.cursor_key.assign_store_length(0);
-
-        // Get previous leaf
-        let prev: *mut LeafNode15<P> = leaf.prev(guard);
-
-        if prev.is_null() {
-            self.stack.set_leaf(StdPtr::null_mut());
-            return (ScanStateBack::FindPrev, None);
-        }
-
-        // Move to previous leaf
-        self.stack.set_leaf(prev);
-
-        // SAFETY: prev is non-null
-        let prev_leaf: &LeafNode15<P> = unsafe { &*prev };
-        prev_leaf.prefetch();
-
-        // Prefetch prev-prev leaf for 2-way pipelining
-        let prev_prev: *mut LeafNode15<P> = prev_leaf.prev(guard);
-        if !prev_prev.is_null() {
-            let prev_prev_leaf: &LeafNode15<P> = unsafe { &*prev_prev };
-            prev_prev_leaf.prefetch();
-        }
-
-        // Get stable version
-        let prev_version: u32 = prev_leaf.version().stable();
-
-        if NodeVersion::is_deleted_version(prev_version) {
-            return (ScanStateBack::Retry, None);
-        }
-
-        // Load permutation and start from last slot
-        let perm: Permuter15 = prev_leaf.permutation();
-        let size: usize = perm.size();
-        let ki: isize = if size > 0 {
-            (size - 1).cast_signed()
-        } else {
-            -1
-        };
-
-        // Reset monotonicity cache for new leaf
-        self.stack.set_last_ikey(u64::MAX);
-
-        self.stack.update_state(prev_version, perm, ki);
-
-        (ScanStateBack::FindPrev, None)
     }
 }
 

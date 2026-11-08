@@ -35,10 +35,7 @@ where
     #[inline(always)]
     fn emit_value(leaf: &LeafNode15<P>, slot: usize, key_len: usize) -> Option<ScanSnapshot<P>> {
         let output = leaf.load_value(slot)?;
-        Some(ScanSnapshot {
-            value: output,
-            key_len,
-        })
+        Some(ScanSnapshot::new(output, key_len))
     }
 }
 
@@ -90,6 +87,7 @@ pub fn try_snapshot_slot<P: LeafPolicy, E: ScanEmitter<P>>(
     slot: usize,
     version: u32,
 ) -> Result<ValidatedSlot<'_, E::Snapshot>, ()> {
+    leaf.prefetch_value(slot);
     let ikey = leaf.ikey_relaxed(slot);
     let keylenx = leaf.keylenx_relaxed(slot);
     let mut suffix = None;
@@ -226,50 +224,46 @@ pub fn compare_cursor_to_slot<P>(
 where
     P: LeafPolicy,
 {
-    let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-    match cursor_key.current_ikey().cmp(&slot_ikey) {
-        Ordering::Less => return Ordering::Less,
-        Ordering::Greater => return Ordering::Greater,
-        Ordering::Equal => {}
+    let ikey = leaf.ikey_relaxed(slot);
+    let ordering = cursor_key.current_ikey().cmp(&ikey);
+    if ordering != Ordering::Equal {
+        return ordering;
     }
-
-    let keylenx: u8 = leaf.keylenx_relaxed(slot);
-    let cursor_len: usize = cursor_key.current_len();
-
-    // Unshift sentinel: the cursor has already consumed this layer pointer.
-    // It must compare after any remaining terminal suffix siblings.
-    if cursor_key.is_unshift_sentinel() {
-        return if keylenx >= LAYER_KEYLENX {
-            Ordering::Equal
-        } else {
-            Ordering::Greater
-        };
-    }
-
-    if keylenx >= LAYER_KEYLENX {
-        // Layer keys are strictly greater than the bare ikey. A cursor with a
-        // suffix may be anywhere inside the layer, so report Equal and let the
-        // caller descend.
-        if cursor_len > IKEY_SIZE {
-            Ordering::Equal
-        } else {
-            Ordering::Less
-        }
-    } else if keylenx == KSUF_KEYLENX {
-        if cursor_len <= IKEY_SIZE {
-            // Terminal cursor is a prefix of the longer key.
-            Ordering::Less
-        } else {
-            let stored: &[u8] = leaf.ksuf(slot).unwrap_or(&[]);
-            cursor_key.suffix().cmp(stored)
-        }
-    } else if cursor_len > IKEY_SIZE {
-        // Cursor has a suffix; every terminal key with the same ikey is
-        // smaller than it.
-        Ordering::Greater
+    let keylenx = leaf.keylenx_relaxed(slot);
+    let suffix = if keylenx == KSUF_KEYLENX
+        && cursor_key.has_suffix()
+        && !cursor_key.is_unshift_sentinel()
+    {
+        leaf.ksuf(slot)
     } else {
-        cursor_len.cmp(&(keylenx as usize))
+        None
+    };
+    compare_cursor_to_parts(cursor_key, ikey, keylenx, suffix)
+}
+
+/// Compare against captured key parts without reloading mutable slot metadata.
+#[inline]
+pub fn compare_cursor_to_parts(
+    cursor_key: &CursorKey,
+    ikey: u64,
+    keylenx: u8,
+    suffix: Option<&[u8]>,
+) -> Ordering {
+    let ordering = crate::key::compare_ikey_keylenx(
+        cursor_key.current_ikey(),
+        cursor_key.current_len(),
+        ikey,
+        usize::from(keylenx),
+    );
+    if ordering != Ordering::Equal {
+        return ordering;
+    }
+    if cursor_key.is_unshift_sentinel() && keylenx < LAYER_KEYLENX {
+        Ordering::Greater
+    } else if keylenx == KSUF_KEYLENX {
+        cursor_key.suffix().cmp(suffix.unwrap_or(&[]))
+    } else {
+        Ordering::Equal
     }
 }
 

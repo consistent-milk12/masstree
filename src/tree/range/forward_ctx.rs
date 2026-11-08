@@ -4,15 +4,13 @@
 
 use crate::permuter::Permuter15;
 use std::cmp::Ordering;
-use std::ptr as StdPtr;
 
 use seize::LocalGuard;
 
 use std::mem::MaybeUninit;
 
-use crate::key::IKEY_SIZE;
+use crate::leaf15::LAYER_KEYLENX;
 use crate::leaf15::LeafNode15;
-use crate::leaf15::{KSUF_KEYLENX, LAYER_KEYLENX};
 use crate::link::Linker;
 use crate::nodeversion::NodeVersion;
 use crate::policy::LeafPolicy;
@@ -26,8 +24,10 @@ use super::batch_common::{
 use super::cursor_key::CursorDebugState;
 use super::cursor_key::CursorKey;
 use super::find::LeafBatchResult;
-use super::helper::{CloneEmitter, PtrEmitter, ScanEmitter};
-use super::helper::{compare_cursor_to_slot, lower_bound_full};
+use super::helper::{
+    CloneEmitter, PtrEmitter, ScanEmitter, SlotPayload, build_slot_key_parts,
+    compare_cursor_to_parts, lower_bound_full, try_snapshot_slot,
+};
 use super::iterator::RangeBound;
 use super::iterator::iter_flags::ForwardFlags;
 use super::scan_state::{
@@ -251,115 +251,54 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         let perm: Permuter15 = leaf.permutation();
         let size: usize = perm.size();
 
-        // Position calculations and initial emission write into a scratch
-        // cursor. Strictly, `self.cursor_key` must still hold the start bound
-        // if validation fails and the caller retries.
-        let mut probe: CursorKey = self.cursor_key.clone();
+        let pos = lower_bound_full(&self.cursor_key, leaf, perm, false);
+        if pos >= size {
+            if leaf.version().has_changed(version) {
+                return (ScanState::Retry, None);
+            }
+            self.stack.update_state(version, perm, pos);
+            return (ScanState::FindNext, None);
+        }
 
-        // Full-key lower bound: an equal-ikey group can contain several
-        // distinct keys (zero-padded terminals and longer suffix variants).
-        let pos: usize = lower_bound_full(&probe, leaf, perm, false);
-        let mut final_pos: usize = pos;
-        let mut emitted: bool = false;
-
-        let (next_state, snapshot) = if pos >= size {
-            (ScanState::FindNext, None)
-        } else {
-            let slot: usize = perm.get(pos);
-            let keylenx: u8 = leaf.keylenx_relaxed(slot);
-            let cmp: Ordering = compare_cursor_to_slot(&probe, leaf, slot);
-
-            if cmp == Ordering::Greater {
-                // Defensive: the lower-bound search cannot land after the cursor.
-                final_pos = pos + 1;
-                (ScanState::FindNext, None)
-            } else if keylenx >= LAYER_KEYLENX {
-                // The first key at or after the cursor lives in this layer.
-                // Load the pointer first and validate before publishing it.
-                let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-                let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-
-                if leaf.version().has_changed(version) {
-                    return (ScanState::Retry, None);
-                }
-
-                self.prepare_down(slot_ikey);
-                probe.assign_store_ikey(slot_ikey);
-                prefetch_read(layer_ptr);
-                self.stack.set_root(layer_ptr);
-                final_pos = pos + 1;
+        let Ok(slot) = try_snapshot_slot::<P, CloneEmitter>(leaf, perm.get(pos), version) else {
+            return (ScanState::Retry, None);
+        };
+        let cmp = compare_cursor_to_parts(&self.cursor_key, slot.ikey, slot.keylenx, slot.suffix);
+        self.flags.clear_cursor_emitted();
+        self.stack.update_state(version, perm, pos);
+        if cmp == Ordering::Greater {
+            self.stack.next();
+            return (ScanState::FindNext, None);
+        }
+        match slot.payload {
+            SlotPayload::Layer(root) => {
+                self.prepare_down(slot.ikey);
+                self.cursor_key.assign_store_ikey(slot.ikey);
+                prefetch_read(root);
+                self.stack.set_root(root);
+                self.stack.next();
                 (ScanState::Down, None)
-            } else if cmp == Ordering::Equal {
-                final_pos = pos + 1;
-
+            }
+            SlotPayload::Value(snapshot) if cmp == Ordering::Equal => {
+                self.stack.next();
                 if emit_equal {
-                    let snapshot = Self::emit_initial_slot(leaf, slot, keylenx, &mut probe);
-                    emitted = snapshot.is_some();
-
-                    (
-                        if emitted {
-                            ScanState::Emit
-                        } else {
-                            ScanState::FindNext
-                        },
-                        snapshot,
-                    )
+                    build_slot_key_parts(
+                        &mut self.cursor_key,
+                        slot.ikey,
+                        slot.keylenx,
+                        slot.suffix,
+                    );
+                    self.flags.mark_cursor_emitted();
+                    (ScanState::Emit, Some(snapshot))
                 } else {
                     (ScanState::FindNext, None)
                 }
-            } else {
-                // Cursor < slot: the scan is already positioned at this slot.
+            }
+            SlotPayload::Empty => {
+                self.stack.next();
                 (ScanState::FindNext, None)
             }
-        };
-
-        if leaf.version().has_changed(version) {
-            return (ScanState::Retry, None);
-        }
-
-        if emitted {
-            self.flags.mark_cursor_emitted();
-        } else {
-            self.flags.clear_cursor_emitted();
-        }
-
-        self.cursor_key = probe;
-        self.stack.update_state(version, perm, final_pos);
-
-        (next_state, snapshot)
-    }
-
-    /// Build the snapshot for an exact initial match (including suffix keys).
-    #[inline]
-    fn emit_initial_slot(
-        leaf: &LeafNode15<P>,
-        slot: usize,
-        keylenx: u8,
-        cursor_key: &mut CursorKey,
-    ) -> Option<ScanSnapshot<P>>
-    where
-        P::Output: Clone,
-    {
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-
-        if keylenx == KSUF_KEYLENX {
-            let stored_suffix: &[u8] = leaf.ksuf(slot)?;
-            let key_len: usize = IKEY_SIZE + stored_suffix.len();
-            let output: P::Output = leaf.load_value(slot)?;
-
-            cursor_key.assign_store_ikey(slot_ikey);
-            let _ = cursor_key.assign_store_suffix(stored_suffix);
-            cursor_key.assign_store_length(key_len);
-
-            Some(ScanSnapshot::new(output, key_len))
-        } else {
-            let key_len: usize = keylenx as usize;
-            let output: P::Output = leaf.load_value(slot)?;
-
-            cursor_key.assign_store_ikey(slot_ikey);
-            cursor_key.assign_store_length(key_len);
-
-            Some(ScanSnapshot::new(output, key_len))
+            SlotPayload::Value(_) => (ScanState::FindNext, None),
         }
     }
 }
@@ -428,7 +367,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return (ScanState::Up, None);
         }
 
-        let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
+        // SAFETY: the scan guard protects the non-null leaf cached by traversal.
+        let leaf: &LeafNode15<P> = unsafe { &*self.stack.leaf_ptr() };
 
         if leaf.version().is_deleted() {
             return (ScanState::Retry, None);
@@ -445,257 +385,43 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             return self.advance_leaf_generic::<E>(guard);
         };
 
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
-        leaf.prefetch_value(slot);
-
-        if slot_ikey < self.stack.last_ikey() {
+        let Ok(slot) = try_snapshot_slot::<P, E>(leaf, slot, self.stack.version()) else {
             return (ScanState::Retry, None);
-        }
-
-        if needs_duplicate_check {
-            let is_dup: bool = if slot_keylenx >= LAYER_KEYLENX {
-                // A layer pointer is a routing entry, not a value; either the
-                // scan descends into it or it is already behind the cursor.
-                false
-            } else {
-                compare_cursor_to_slot(&self.cursor_key, leaf, slot) != Ordering::Less
-            };
-
-            if is_dup {
-                self.stack.next();
-                return (ScanState::FindNext, None);
-            }
-        }
-
-        if slot_keylenx >= LAYER_KEYLENX {
-            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-
-            // Validate before mutating the stack/cursor: the slot may have
-            // been converted back to a value by a concurrent update.
-            if leaf.version().has_changed(self.stack.version()) {
-                return (ScanState::Retry, None);
-            }
-
-            self.prepare_down(slot_ikey);
-            self.layer_stack
-                .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
-            self.cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(layer_ptr);
-            self.stack.set_root(layer_ptr);
-
-            return (ScanState::Down, None);
-        }
-
-        // Snapshot the suffix once; do not re-read it after validation.
-        let suffix: Option<&[u8]> = if slot_keylenx == KSUF_KEYLENX {
-            leaf.ksuf(slot)
-        } else {
-            None
         };
-
-        let key_len: usize = if slot_keylenx == KSUF_KEYLENX {
-            suffix.map_or(IKEY_SIZE, |s| IKEY_SIZE + s.len())
-        } else {
-            slot_keylenx as usize
-        };
-
-        let Some(snapshot) = E::emit_value(leaf, slot, key_len) else {
-            if leaf.version().has_changed(self.stack.version()) {
-                return (ScanState::Retry, None);
-            }
-
-            self.stack.next();
-            return (ScanState::FindNext, None);
-        };
-
-        // Validate after the complete payload read and before publishing the
-        // key/cursor. Otherwise a reuse or layer conversion in this gap could
-        // emit a stale value or a layer pointer as a value.
-        if leaf.version().has_changed(self.stack.version()) {
+        if slot.ikey < self.stack.last_ikey() {
             return (ScanState::Retry, None);
         }
-
-        self.cursor_key.assign_store_ikey(slot_ikey);
-
-        if let Some(suffix) = suffix {
-            let _ = self.cursor_key.assign_store_suffix(suffix);
-        }
-
-        self.cursor_key.assign_store_length(key_len);
-        self.cursor_key.mark_key_complete();
-        self.stack.set_last_ikey(slot_ikey);
-        self.stack.next();
-        self.flags.mark_cursor_emitted();
-
-        (ScanState::Emit, Some(snapshot))
-    }
-}
-
-// ============================================================================
-//  Single-layer fast path
-// ============================================================================
-
-impl<P: LeafPolicy> ForwardScanCtx<P> {
-    /// Single-layer fast path for zero-copy `find_next`.
-    ///
-    /// Corresponds to `find::find_next_single_layer_ptr`.
-    #[inline]
-    #[expect(clippy::cast_possible_truncation)]
-    pub fn find_next_single_layer_ptr(
-        &mut self,
-        guard: &LocalGuard<'_>,
-        needs_duplicate_check: bool,
-    ) -> (ScanState, Option<ScanSnapshotPtr<P::Value>>) {
-        if self.stack.is_null() {
-            return (ScanState::FindNext, None);
-        }
-
-        let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
-
-        if leaf.version().is_deleted() {
-            return (ScanState::Retry, None);
-        }
-
-        // Check if leaf was concurrently modified since we cached the version.
-        // Symmetric with reverse's find_prev_single_layer (reverse_ctx.rs).
-        let version: u32 = self.stack.version();
-        if leaf.version().has_changed(version) {
-            return (ScanState::Retry, None);
-        }
-
-        let Some(slot) = self.stack.kp() else {
-            return self.advance_leaf_single_layer(guard);
-        };
-
-        let slot_ikey: u64 = leaf.ikey_relaxed(slot);
-        let slot_keylenx: u8 = leaf.keylenx_relaxed(slot);
-        leaf.prefetch_value(slot);
-
-        if slot_ikey < self.stack.last_ikey() {
-            return (ScanState::Retry, None);
-        }
-
-        if needs_duplicate_check {
-            let is_dup: bool = if slot_keylenx >= LAYER_KEYLENX {
-                false
-            } else {
-                compare_cursor_to_slot(&self.cursor_key, leaf, slot) != Ordering::Less
-            };
-
-            if is_dup {
-                self.stack.next();
-                return (ScanState::FindNext, None);
-            }
-        }
-
-        // True layer pointer — prepare for descent
-        if slot_keylenx >= LAYER_KEYLENX {
-            let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-
-            if leaf.version().has_changed(version) {
-                return (ScanState::Retry, None);
-            }
-
-            self.prepare_down(slot_ikey);
-            self.cursor_key.assign_store_ikey(slot_ikey);
-            prefetch_read(layer_ptr);
-            return (ScanState::Down, None);
-        }
-
-        // Suffix key (KSUF) or other non-inline — bail to multi-layer path.
-        // Returning FindNext after disabling single-layer mode causes the caller
-        // to re-enter the loop and fall through to the multi-layer path which
-        // handles KSUF correctly via find_next_ptr.
-        if slot_keylenx > IKEY_SIZE as u8 {
-            self.flags.disable_single_layer_mode();
-            return (ScanState::FindNext, None);
-        }
-
-        let slot_ptr: *mut u8 = leaf.load_value_raw(slot);
-        if slot_ptr.is_null() {
+        if needs_duplicate_check
+            && slot.keylenx < LAYER_KEYLENX
+            && compare_cursor_to_parts(&self.cursor_key, slot.ikey, slot.keylenx, slot.suffix)
+                != Ordering::Less
+        {
             self.stack.next();
             return (ScanState::FindNext, None);
         }
-
-        // Validate after the pointer/value read and before publishing it.
-        if leaf.version().has_changed(version) {
-            return (ScanState::Retry, None);
+        match slot.payload {
+            SlotPayload::Layer(root) => {
+                self.prepare_down(slot.ikey);
+                self.layer_stack
+                    .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
+                self.cursor_key.assign_store_ikey(slot.ikey);
+                prefetch_read(root);
+                self.stack.set_root(root);
+                (ScanState::Down, None)
+            }
+            SlotPayload::Empty => {
+                self.stack.next();
+                (ScanState::FindNext, None)
+            }
+            SlotPayload::Value(snapshot) => {
+                build_slot_key_parts(&mut self.cursor_key, slot.ikey, slot.keylenx, slot.suffix);
+                self.cursor_key.mark_key_complete();
+                self.stack.set_last_ikey(slot.ikey);
+                self.stack.next();
+                self.flags.mark_cursor_emitted();
+                (ScanState::Emit, Some(snapshot))
+            }
         }
-
-        let key_len: usize = slot_keylenx as usize;
-        self.cursor_key.assign_store_ikey(slot_ikey);
-        self.cursor_key.assign_store_length(key_len);
-        self.cursor_key.mark_key_complete();
-
-        self.stack.set_last_ikey(slot_ikey);
-        self.stack.next();
-        self.flags.mark_cursor_emitted();
-
-        (
-            ScanState::Emit,
-            Some(ScanSnapshotPtr::from_raw(slot_ptr, key_len)),
-        )
-    }
-
-    /// Advance to next leaf in single-layer mode.
-    #[inline(always)]
-    fn advance_leaf_single_layer(
-        &mut self,
-        guard: &LocalGuard<'_>,
-    ) -> (ScanState, Option<ScanSnapshotPtr<P::Value>>) {
-        let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
-        let version: u32 = self.stack.version();
-
-        let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
-
-        if Linker::is_marked(next_raw) {
-            leaf.wait_for_split();
-            return (ScanState::Retry, None);
-        }
-
-        if leaf.version().has_changed(version) {
-            return (ScanState::Retry, None);
-        }
-
-        let next: *mut LeafNode15<P> = next_raw.map_addr(|addr| addr & !1);
-
-        if next.is_null() {
-            self.stack.set_leaf(StdPtr::null_mut());
-            return (ScanState::FindNext, None);
-        }
-
-        self.stack.set_leaf(next);
-
-        // SAFETY: next is non-null and protected by guard
-        let next_leaf: &LeafNode15<P> = unsafe { &*next };
-
-        next_leaf.prefetch();
-
-        let next_next: *mut LeafNode15<P> = next_leaf.safe_next(guard);
-        if !next_next.is_null() {
-            // SAFETY: next_next is non-null and derived from a valid leaf's B-link
-            let next_next_leaf: &LeafNode15<P> = unsafe { &*next_next };
-            next_next_leaf.prefetch();
-        }
-
-        let next_version: u32 = next_leaf.version().stable();
-
-        if NodeVersion::is_deleted_version(next_version) {
-            return (ScanState::Retry, None);
-        }
-
-        let perm: Permuter15 = next_leaf.permutation();
-
-        // Before the first emission the cursor is still the *start* key, so an
-        // exact match must be included when the bound is inclusive. After an
-        // emission the cursor is the last emitted key and must be skipped.
-        let skip_equal: bool = self.flags.cursor_emitted() || !self.flags.emit_equal();
-        let pos: usize = lower_bound_full(&self.cursor_key, next_leaf, perm, skip_equal);
-
-        self.stack.update_state(next_version, perm, pos);
-
-        (ScanState::FindNext, None)
     }
 }
 
@@ -721,7 +447,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         &mut self,
         guard: &LocalGuard<'_>,
     ) -> (ScanState, Option<E::Snapshot>) {
-        let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
+        // SAFETY: the scan guard protects the non-null leaf cached by traversal.
+        let leaf: &LeafNode15<P> = unsafe { &*self.stack.leaf_ptr() };
         let version: u32 = self.stack.version();
 
         let next_raw: *mut LeafNode15<P> = leaf.next_raw(guard);
@@ -1174,7 +901,8 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
             // Check leaf deletion
             // SAFETY: stack.is_null() check above ensures leaf_ptr is valid,
             // and the guard protects the node from deallocation.
-            let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
+            // SAFETY: the scan guard protects the non-null leaf cached by traversal.
+            let leaf: &LeafNode15<P> = unsafe { &*self.stack.leaf_ptr() };
             if leaf.version().is_deleted() {
                 self.state = ScanState::Retry;
                 continue;
@@ -1603,7 +1331,6 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     ///
     /// Returns `(&[u8], &P::Value)` where both are borrowed references.
     #[inline(always)]
-    #[expect(clippy::too_many_lines, reason = "Complex allocation logic")]
     pub fn advance_no_alloc_ref<'s>(
         &'s mut self,
         end_bound: &RangeBound<'_>,
@@ -1637,94 +1364,6 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         }
 
         loop {
-            // ================================================================
-            // Single-layer fast path (keys ≤ 8 bytes)
-            // ================================================================
-            if self.flags.single_layer_mode() {
-                if self.state == ScanState::Retry {
-                    self.state = self.find_retry(guard);
-                    self.flags.require_duplicate_check();
-                    continue;
-                }
-
-                let (new_state, snapshot_ptr) =
-                    self.find_next_single_layer_ptr(guard, self.flags.needs_duplicate_check());
-
-                if self.flags.needs_duplicate_check() {
-                    self.flags.clear_duplicate_check();
-                }
-
-                self.state = new_state;
-
-                match new_state {
-                    ScanState::Emit => {
-                        if let Some(snap) = snapshot_ptr {
-                            // SAFETY: CursorKey invariant guarantees offset + len <= MAX_KEY_LENGTH
-                            let key = unsafe { self.cursor_key.full_key_unchecked() };
-
-                            if !end_bound.contains(key) {
-                                self.flags.mark_exhausted();
-                                return None;
-                            }
-
-                            self.state = ScanState::FindNext;
-                            // SAFETY: Version validated, guard held, snap pointer valid.
-                            let value_ref: &P::Value =
-                                unsafe { snap.resolve_value_ref::<P>(&mut self.scratch_value) };
-
-                            return Some((key, value_ref));
-                        }
-                    }
-
-                    ScanState::FindNext => {
-                        if self.stack.is_null() {
-                            self.flags.mark_exhausted();
-                            return None;
-                        }
-
-                        continue;
-                    }
-
-                    ScanState::Retry => continue,
-
-                    ScanState::Down => {
-                        // Encountered layer pointer - fall back to multi-layer
-                        self.flags.disable_single_layer_mode();
-
-                        self.layer_stack
-                            .push(LayerContext::new(self.stack.root(), self.stack.leaf_ptr()));
-
-                        let Some(slot) = self.stack.kp() else {
-                            debug_assert!(
-                                false,
-                                "Down state entered without valid slot - state machine bug"
-                            );
-
-                            self.state = ScanState::Retry;
-                            continue;
-                        };
-
-                        // SAFETY: find_next_single_layer_ptr validated the leaf version,
-                        // and the guard protects the node from deallocation.
-                        let leaf: &LeafNode15<P> = unsafe { self.stack.leaf_ref() };
-                        let layer_ptr: *mut u8 = leaf.load_layer_raw(slot);
-                        self.stack.set_root(layer_ptr);
-
-                        // Fall through to handle Down below
-                    }
-
-                    ScanState::Up => {
-                        self.flags.mark_exhausted();
-
-                        return None;
-                    }
-                }
-            }
-
-            // ================================================================
-            // Multi-layer path (handles Down/Up transitions)
-            // ================================================================
-
             match self.step_transitions(guard) {
                 StepResult::Exhausted => return None,
                 StepResult::Continue => continue,

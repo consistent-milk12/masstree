@@ -1606,8 +1606,9 @@ is retried. `find_retry` re-descends from the current layer root.
 Slot reads follow a snapshot/validate/commit protocol: read the ikey, keylenx,
 suffix, and value (or layer pointer) first; validate the cached leaf version;
 only then write the cursor, push the layer stack, or publish a snapshot.
-`find_initial` performs its position search and initial emission in a scratch
-`CursorKey`, so a failed validation cannot overwrite the start bound.
+Initial positioning, ordinary readers and batches all use `try_snapshot_slot`.
+Position searches leave the cursor untouched until the complete slot validates;
+no scratch cursor copy or post-validation slot reload is needed.
 
 `find_initial`/`find_next` are wrapped by `ForwardScanCtx::advance`, which
 drives the state machine and handles `Down`/`Up` transitions. `handle_down`

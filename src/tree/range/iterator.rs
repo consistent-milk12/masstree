@@ -599,10 +599,6 @@ where
 
     /// Advance the back iterator state machine.
     #[inline]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "State machine benefits from unified logic"
-    )]
     fn advance_back(&mut self) -> Option<ScanEntry<P::Output>> {
         // SAFETY: advance_back is only called after initialize_back, which
         // guarantees self.rev is Some.
@@ -649,35 +645,6 @@ where
                 }
 
                 ScanStateBack::FindPrev => {
-                    if self.fwd.flags.single_layer_mode() {
-                        let needs_dup_check = rev.flags.needs_duplicate_check();
-                        if needs_dup_check {
-                            rev.flags.clear_duplicate_check();
-                        }
-
-                        let (new_state, snapshot) =
-                            rev.find_prev_single_layer(self.guard, needs_dup_check);
-
-                        rev.state = new_state;
-                        rev.snapshot = snapshot;
-
-                        match new_state {
-                            ScanStateBack::FindPrev => {
-                                if rev.stack.get_leaf_ptr().is_null() {
-                                    rev.flags.mark_exhausted();
-                                    return None;
-                                }
-                            }
-                            ScanStateBack::Down => {
-                                self.fwd.flags.disable_single_layer_mode();
-                                rev.state = ScanStateBack::FindPrev;
-                            }
-                            _ => {}
-                        }
-
-                        continue;
-                    }
-
                     let (new_state, snapshot) = if rev.flags.needs_duplicate_check() {
                         rev.flags.clear_duplicate_check();
                         rev.find_prev_with_dup_check(self.guard)

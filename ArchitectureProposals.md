@@ -195,8 +195,14 @@ instead of `(6, 6)` before the fix. Forward/reverse inline, boxed copy and boxed
 reference variants now preserve the snapshot through slot reuse and layer
 conversion, including under Miri. The promoted-layer BTreeMap probe and callback
 mutation regressions pass; a Loom key/handle model validates the ordering (not
-the whole tree/EBR implementation). Per-entry readers and context/state-machine
-unification remain in progress.
+the whole tree/EBR implementation). Per-entry readers now use that same kernel, including initial positioning and
+layer pointers. The duplicate single-layer readers/leaf walkers are removed.
+A stale-parent-version regression rejected initial reverse descent only after
+this change; a second BTreeMap regression previously returned zero of 40 keys
+when its end bound used a later prefix. Both pass under Miri. Initial forward
+positioning no longer copies the 256-byte cursor to scratch, and all comparisons
+share the ikey/key-length helper. Context/state-machine unification remains in
+progress.
 
 Each significant implementation change is committed separately with its tests
 and measured results. The pre-existing mimalloc-v2 edit in `Cargo.toml` is user

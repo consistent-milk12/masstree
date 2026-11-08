@@ -370,20 +370,7 @@ impl CursorKey {
     #[cfg(test)]
     #[inline(always)]
     pub fn compare(&self, other_ikey: u64, keylenx: usize) -> Ordering {
-        match self.ikey.cmp(&other_ikey) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        if self.len > IKEY_SIZE {
-            if keylenx <= IKEY_SIZE {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        } else {
-            self.len.cmp(&keylenx)
-        }
+        crate::key::compare_ikey_keylenx(self.ikey, self.len, other_ikey, keylenx)
     }
 
     /// Compare suffix bytes against stored suffix.
