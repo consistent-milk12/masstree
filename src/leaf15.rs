@@ -320,7 +320,7 @@ impl<P: LeafPolicy> LeafNode15<P> {
     /// Write-through update: atomically read old value and write new value.
     ///
     /// Bypasses Box allocation and EBR retirement. Only callable when
-    /// `P::CAN_WRITE_THROUGH` is true.
+    /// `P::can_write_through()` is true.
     ///
     /// # Safety
     ///

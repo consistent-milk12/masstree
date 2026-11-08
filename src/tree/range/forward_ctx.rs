@@ -80,7 +80,7 @@ pub struct ForwardScanCtx<P: LeafPolicy> {
     ///
     /// Used by `advance_no_alloc_ref` to hold an atomically-read value copy
     /// so a `&P::Value` can be returned without aliasing the mutable Box data.
-    /// Only written when `P::CAN_WRITE_THROUGH` is true (V <= 8 bytes).
+    /// Only written when `P::can_write_through()` is true (V <= 8 bytes).
     pub(crate) scratch_value: MaybeUninit<P::Value>,
 
     /// Packed forward-specific boolean flags.

@@ -19,9 +19,10 @@ mod audit_padded_write_through {
     }
 
     #[test]
-    fn padded_type_is_write_through_and_read_atomically() {
-        assert!(BoxPolicy::<Padded>::CAN_WRITE_THROUGH);
+    fn padded_type_is_not_write_through() {
+        assert!(!BoxPolicy::<Padded>::can_write_through());
         let p: crate::policy::ValuePtr<Padded> = BoxPolicy::<Padded>::into_output(Padded { a: 7 });
+        // Non-write-through: clone through the pointer rather than an atomic.
         let copy: Padded = BoxPolicy::<Padded>::clone_value_from_output(&p);
         assert_eq!(copy, Padded { a: 7 });
     }

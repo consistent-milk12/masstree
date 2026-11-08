@@ -1,6 +1,6 @@
-// Miri: `CAN_WRITE_THROUGH` admits a type with uninitialized padding.
-// Expected: uninitialized-memory read through the AtomicU64 load.
-use masstree::MassTree15;
+// SAFE-05 regression: a type with uninitialized padding must not qualify for
+// write-through. Run under Miri; a clean run means no uninitialized read.
+use masstree::{BoxPolicy, LeafPolicy, MassTree15};
 
 #[repr(align(8))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,6 +10,7 @@ struct Padded {
 }
 
 fn main() {
+    assert!(!<BoxPolicy<Padded> as LeafPolicy>::can_write_through());
     let tree: MassTree15<Padded> = MassTree15::new();
     tree.insert(b"k", Padded { a: 7 });
     let got = tree.get(b"k").unwrap();

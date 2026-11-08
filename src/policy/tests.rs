@@ -338,3 +338,56 @@ mod retire_handle_tests {
         }
     }
 }
+
+/// SAFE-05: the write-through gate must admit only primitive, padding-free,
+/// non-pointer representations.
+#[cfg(test)]
+mod write_through_gate_tests {
+    use crate::policy::{BoxPolicy, LeafPolicy};
+
+    #[repr(align(8))]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Padded {
+        a: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Pair {
+        a: u32,
+        b: u32,
+    }
+
+    #[test]
+    fn primitive_integer_and_float_types_are_eligible() {
+        assert!(BoxPolicy::<u8>::can_write_through());
+        assert!(BoxPolicy::<u16>::can_write_through());
+        assert!(BoxPolicy::<u32>::can_write_through());
+        assert!(BoxPolicy::<u64>::can_write_through());
+        assert!(BoxPolicy::<usize>::can_write_through());
+        assert!(BoxPolicy::<i8>::can_write_through());
+        assert!(BoxPolicy::<i16>::can_write_through());
+        assert!(BoxPolicy::<i32>::can_write_through());
+        assert!(BoxPolicy::<i64>::can_write_through());
+        assert!(BoxPolicy::<isize>::can_write_through());
+        assert!(BoxPolicy::<f32>::can_write_through());
+        assert!(BoxPolicy::<f64>::can_write_through());
+        assert!(BoxPolicy::<bool>::can_write_through());
+        assert!(BoxPolicy::<char>::can_write_through());
+    }
+
+    #[test]
+    fn padding_and_composite_types_are_rejected() {
+        assert!(!BoxPolicy::<Padded>::can_write_through());
+        assert!(!BoxPolicy::<Pair>::can_write_through());
+        assert!(!BoxPolicy::<(u32, u32)>::can_write_through());
+        assert!(!BoxPolicy::<[u8; 8]>::can_write_through());
+        assert!(!BoxPolicy::<u128>::can_write_through());
+    }
+
+    #[test]
+    fn pointer_bearing_types_are_rejected() {
+        assert!(!BoxPolicy::<&'static u64>::can_write_through());
+        assert!(!BoxPolicy::<&'static mut u64>::can_write_through());
+    }
+}

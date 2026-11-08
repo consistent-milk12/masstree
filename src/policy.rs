@@ -30,7 +30,7 @@ use std::cmp::Ordering;
 use std::fmt::{self as StdFmt, Debug, Display, Formatter};
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::mem::{MaybeUninit, align_of, needs_drop, size_of};
+use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::ptr::NonNull;
 
@@ -40,6 +40,35 @@ use crate::inline::bits::InlineBits;
 use crate::ordering::READ_ORD;
 use crate::prefetch::prefetch_read;
 use crate::suffix::SuffixBagCell;
+
+/// Returns true if `V` is a primitive type that can be round-tripped through
+/// an integer atomic without violating its representation.
+///
+/// The list is deliberately closed. Adding a type requires proving that every
+/// bit pattern produced by the atomic store is a valid `V` (or that only valid
+/// values are ever stored) and that the representation has no padding and no
+/// provenance-bearing pointers.
+#[inline(always)]
+pub(crate) fn is_atomic_word<V: 'static>() -> bool {
+    use std::any::TypeId;
+
+    let id = TypeId::of::<V>();
+
+    id == TypeId::of::<u8>()
+        || id == TypeId::of::<u16>()
+        || id == TypeId::of::<u32>()
+        || id == TypeId::of::<u64>()
+        || id == TypeId::of::<usize>()
+        || id == TypeId::of::<i8>()
+        || id == TypeId::of::<i16>()
+        || id == TypeId::of::<i32>()
+        || id == TypeId::of::<i64>()
+        || id == TypeId::of::<isize>()
+        || id == TypeId::of::<f32>()
+        || id == TypeId::of::<f64>()
+        || id == TypeId::of::<bool>()
+        || id == TypeId::of::<char>()
+}
 
 // ============================================================================
 //  ValuePtr<V>
@@ -550,12 +579,16 @@ pub trait LeafPolicy: sealed::Sealed + Send + Sync + Sized + 'static {
     /// Whether this policy supports write-through updates for small values.
     ///
     /// When true, update operations for existing keys can modify the value
-    /// in place (via atomic write) without allocating a new Box or scheduling
-    /// EBR retirement.
+    /// in place (via an integer atomic) without allocating a new Box or
+    /// scheduling EBR retirement.
     ///
-    /// Requirements: `size_of::<Value>() <= 8` and the storage array supports
-    /// atomic read/write through the allocation pointer.
-    const CAN_WRITE_THROUGH: bool = false;
+    /// Only types whose every bit pattern is a valid value and whose
+    /// representation contains no padding or provenance-bearing pointers may
+    /// qualify. `BoxPolicy` answers this from a closed list of primitive
+    /// types, not from a size/alignment heuristic.
+    fn can_write_through() -> bool {
+        false
+    }
 
     // ========================================================================
     //  Slot Queries
@@ -733,18 +766,16 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
     const NEEDS_RETIREMENT: bool = true;
     const SUPPORTS_REF: bool = true;
 
-    /// Write-through is supported only for no-drop, naturally-aligned
-    /// value types up to 8 bytes, where atomic writes through the Box pointer
-    /// avoid heap allocation and EBR retirement on updates.
-    ///
-    /// `needs_drop == false` prevents duplicating ownership-bearing values via
-    /// atomic load. The `align_of >= size_of` check excludes packed structs
-    /// and composite types whose size exceeds their alignment, which would not
-    /// have naturally-aligned Box allocations.
-    const CAN_WRITE_THROUGH: bool = !needs_drop::<V>()
-        && size_of::<V>() <= 8
-        && size_of::<V>().is_power_of_two()
-        && align_of::<V>() >= size_of::<V>();
+    /// Write-through is restricted to primitive numeric, `bool`, and `char`
+    /// values. These have no padding, no ownership, and every bit pattern the
+    /// store path can produce is valid. A size/alignment heuristic is not
+    /// sufficient: it admits padded structs, `&T`/`&mut T` (whose pointer
+    /// provenance an integer atomic cannot preserve), and other types whose
+    /// bytes are not a plain integer representation.
+    #[inline(always)]
+    fn can_write_through() -> bool {
+        is_atomic_word::<V>()
+    }
 
     #[inline(always)]
     fn is_value_empty(values: &BoxValueArray<V>, slot: usize) -> bool {
@@ -799,7 +830,7 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
     where
         V: Clone,
     {
-        if Self::CAN_WRITE_THROUGH {
+        if Self::can_write_through() {
             // SAFETY: ValuePtr wraps a valid Box<V> pointer. CAN_WRITE_THROUGH
             // guarantees size 1/2/4/8 with natural alignment. Atomic read avoids
             // creating &V to data that may be concurrently modified by
@@ -844,7 +875,7 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
     #[inline(always)]
     unsafe fn write_through_update(values: &BoxValueArray<V>, slot: usize, new_value: &V) -> V {
         debug_assert!(
-            Self::CAN_WRITE_THROUGH,
+            Self::can_write_through(),
             "write_through_update called but CAN_WRITE_THROUGH is false"
         );
 
@@ -866,7 +897,7 @@ impl<V: Send + Sync + 'static> LeafPolicy for BoxPolicy<V> {
 
         if ptr.is_null() {
             None
-        } else if Self::CAN_WRITE_THROUGH {
+        } else if Self::can_write_through() {
             // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with natural
             // alignment. Atomic read avoids creating &V to data that may be
             // concurrently modified by write_through_update.
@@ -890,7 +921,7 @@ impl<V: Send + Sync + 'static> RefPolicy for BoxPolicy<V> {
         output: &'a ValuePtr<V>,
         scratch: &'a mut MaybeUninit<V>,
     ) -> &'a V {
-        if Self::CAN_WRITE_THROUGH {
+        if Self::can_write_through() {
             // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with natural
             // alignment. Atomic read avoids aliasing violation with concurrent
             // write_through_update. The copy is stored in scratch so the

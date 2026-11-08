@@ -135,7 +135,7 @@ where
     /// Write-through update: modify existing value in place without allocation.
     ///
     /// Returns the old value by copy. No Box allocation or EBR retirement needed.
-    /// Only callable when `P::CAN_WRITE_THROUGH` is true.
+    /// Only callable when `P::can_write_through()` is true.
     ///
     /// # Safety
     ///
@@ -150,7 +150,7 @@ where
         new_value: &P::Value,
     ) -> P::Value {
         debug_assert!(
-            P::CAN_WRITE_THROUGH,
+            P::can_write_through(),
             "write-through update called but CAN_WRITE_THROUGH is false"
         );
 
@@ -285,7 +285,7 @@ where
     /// Insert with deferred allocation and write-through updates.
     ///
     /// Delegates to `insert_concurrent` with `WriteThroughInsert` strategy.
-    /// Only called when `P::CAN_WRITE_THROUGH` is true.
+    /// Only called when `P::can_write_through()` is true.
     #[inline(always)]
     pub(super) fn insert_concurrent_value(
         &self,

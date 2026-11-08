@@ -565,7 +565,7 @@ impl<V> ScanSnapshotPtr<V> {
         &self,
         scratch: &'a mut MaybeUninit<V>,
     ) -> &'a V {
-        if P::CAN_WRITE_THROUGH {
+        if P::can_write_through() {
             // SAFETY: CAN_WRITE_THROUGH guarantees atomic read is sound.
             *scratch = MaybeUninit::new(unsafe { self.value_copy() });
 

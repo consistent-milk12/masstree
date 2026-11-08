@@ -675,7 +675,7 @@ where
         P::Value: Clone,
     {
         let guard: LocalGuard<'_> = self.guard();
-        if P::CAN_WRITE_THROUGH {
+        if P::can_write_through() {
             self.insert_batch_values_with_guard(entries, &guard)
         } else {
             let result: BatchInsertResult<P::Output> =
@@ -711,7 +711,7 @@ where
         I: IntoIterator<Item = (Vec<u8>, P::Value)>,
     {
         self.verify_guard(guard);
-        if P::CAN_WRITE_THROUGH {
+        if P::can_write_through() {
             let value_result: BatchInsertResult<P::Value> =
                 self.insert_batch_values_with_guard(entries, guard);
 

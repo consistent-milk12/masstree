@@ -4,7 +4,7 @@ use masstree::{BoxPolicy, LeafPolicy, MassTree15};
 static VALUE: u64 = 123;
 
 fn main() {
-    assert!(<BoxPolicy<&'static u64> as LeafPolicy>::CAN_WRITE_THROUGH);
+    assert!(!<BoxPolicy<&'static u64> as LeafPolicy>::can_write_through());
     let tree = MassTree15::<&'static u64>::new();
     tree.insert(b"key", &VALUE);
     let guard = tree.guard();

@@ -646,7 +646,7 @@ where
     {
         let guard = self.guard();
 
-        if P::CAN_WRITE_THROUGH {
+        if P::can_write_through() {
             // Optimized path: deferred allocation with write-through for updates.
             // Avoids Box::new + defer_retire on the hot update path.
             let mut key: Key<'_> = Key::new(key);
@@ -743,7 +743,7 @@ where
         self.verify_guard(guard);
         let mut key: Key<'_> = Key::new(key);
 
-        if P::CAN_WRITE_THROUGH {
+        if P::can_write_through() {
             // Optimized path: deferred allocation with write-through for updates.
             match self.insert_concurrent_value(&mut key, value, guard) {
                 Ok(result) => result,

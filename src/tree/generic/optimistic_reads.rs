@@ -877,7 +877,7 @@ where
         let mut search_key: Key<'_> = Key::new(key);
 
         self.get_impl(&mut search_key, guard, |ptr: *mut u8| {
-            if P::CAN_WRITE_THROUGH {
+            if P::can_write_through() {
                 // SAFETY: CAN_WRITE_THROUGH guarantees size 1/2/4/8 with
                 // natural alignment. Atomic read avoids aliasing violation
                 // with concurrent write_through_update.

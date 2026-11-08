@@ -61,7 +61,7 @@ impl<P: LeafPolicy, A: TreeAllocator<P>> InsertStrategy<P, A> for GenericInsert 
 
 /// Write-through insert strategy: input is `P::Value` (deferred allocation).
 ///
-/// Only used when `P::CAN_WRITE_THROUGH` is true. Updates existing values
+/// Only used when `P::can_write_through()` is true. Updates existing values
 /// in place without Box allocation or EBR retirement.
 pub struct WriteThroughInsert;
 

@@ -69,7 +69,7 @@ where
 {
     #[inline(always)]
     fn visit(&mut self, leaf: &LeafNode15<P>, slot: usize, key: &[u8]) -> Option<bool> {
-        if P::CAN_WRITE_THROUGH {
+        if P::can_write_through() {
             // Atomic read avoids aliasing violation with concurrent
             // write_through_update. The copy lives on the stack, so the
             // callback's &V is to owned data, not the mutable Box allocation.
