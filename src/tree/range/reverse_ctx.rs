@@ -224,6 +224,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
                     emit_equal,
                 ) {
                     InitialPositionResult::Emit(snapshot) => {
+                        self.flags.mark_cursor_emitted();
                         return (ScanStateBack::Emit, Some(snapshot));
                     }
 
@@ -733,6 +734,9 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             return (ScanStateBack::FindPrev, None);
         };
 
+        // The cursor now holds this emitted key.
+        self.flags.mark_cursor_emitted();
+
         // Update cached ikey for monotonicity check
         self.stack.set_last_ikey(slot_ikey);
 
@@ -872,6 +876,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
             self.stack.set_leaf(candidate);
             self.stack.set_last_ikey(u64::MAX);
+            self.flags.clear_cursor_emitted();
             self.stack.update_state(version, perm, ki);
 
             return (ScanStateBack::FindPrev, None);
@@ -936,12 +941,29 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             // SAFETY: leaf_ptr is valid (null checked, not deleted)
             let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
             let perm: <LeafNode15<P> as TreeLeafNode<P>>::Perm = leaf.permutation();
-            let ki: isize = ReverseScanHelper::lower_reverse(
-                &self.cursor_key,
-                leaf,
-                &perm,
-                self.flags.upper_bound(),
-            );
+
+            // A retry must not re-emit the key the cursor already holds. The
+            // unshift sentinel is a positional marker, not a real key, so it
+            // keeps the inclusive search.
+            let skip_equal: bool = (self.flags.cursor_emitted()
+                || self.flags.needs_duplicate_check())
+                && !self.cursor_key.is_unshift_sentinel();
+
+            let ki: isize = if skip_equal {
+                ReverseScanHelper::lower_reverse_strict(
+                    &self.cursor_key,
+                    leaf,
+                    &perm,
+                    self.flags.upper_bound(),
+                )
+            } else {
+                ReverseScanHelper::lower_reverse(
+                    &self.cursor_key,
+                    leaf,
+                    &perm,
+                    self.flags.upper_bound(),
+                )
+            };
 
             // Update stack with new position
             self.stack.set_leaf(leaf_ptr);
@@ -969,6 +991,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     pub(crate) fn handle_down_back(&mut self) {
         self.cursor_key.shift_clear_reverse();
         self.flags.set_upper_bound();
+        self.flags.clear_cursor_emitted();
         self.stack.set_last_ikey(u64::MAX);
     }
 
@@ -1041,6 +1064,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
         // Step 7: Reset monotonicity cache for new leaf context
         self.stack.set_last_ikey(u64::MAX);
+        self.flags.mark_cursor_emitted();
 
         // Step 8: Update stack state
         self.stack.update_state(version, perm, ki);
@@ -1142,6 +1166,9 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
 
         // Clear upper_bound after successful emit
         self.flags.clear_upper_bound();
+
+        // The cursor now holds this emitted key.
+        self.flags.mark_cursor_emitted();
 
         // Update cached ikey for monotonicity check
         self.stack.set_last_ikey(slot_ikey);
@@ -1269,20 +1296,20 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     pub(crate) fn process_prev_leaf_batch_ptr<F>(
         &mut self,
         start_bound: &RangeBound<'_>,
-        start_bound_ikey: Option<u64>,
         visitor: &mut F,
         count: &mut usize,
     ) -> LeafBatchResultBack
     where
         F: FnMut(&[u8], &P::Value) -> bool,
     {
+        let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
         let (result, ki, root) = {
             let mut ctx =
                 build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
             let r = process_batch_keyed::<Backward, _, P>(
                 &mut ctx,
                 start_bound,
-                start_bound_ikey,
+                cursor_bound,
                 &mut RefSlotVisitor(visitor),
                 count,
                 &mut self.flags,
@@ -1299,20 +1326,20 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     pub(crate) fn process_prev_leaf_batch<F>(
         &mut self,
         start_bound: &RangeBound<'_>,
-        start_bound_ikey: Option<u64>,
         visitor: &mut F,
         count: &mut usize,
     ) -> LeafBatchResultBack
     where
         F: FnMut(&[u8], P::Output) -> bool,
     {
+        let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
         let (result, ki, root) = {
             let mut ctx =
                 build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
             let r = process_batch_keyed::<Backward, _, P>(
                 &mut ctx,
                 start_bound,
-                start_bound_ikey,
+                cursor_bound,
                 &mut CopySlotVisitor(visitor),
                 count,
                 &mut self.flags,
@@ -1329,20 +1356,20 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
     pub(crate) fn process_prev_leaf_batch_values<F>(
         &mut self,
         start_bound: &RangeBound<'_>,
-        start_bound_ikey: Option<u64>,
         visitor: &mut F,
         count: &mut usize,
     ) -> LeafBatchResultBack
     where
         F: FnMut(P::Output) -> bool,
     {
+        let cursor_bound = start_bound.cursor_bound(&self.cursor_key, false);
         let (result, ki, root) = {
             let mut ctx =
                 build_reverse_batch_ctx(&self.stack, &mut self.cursor_key, &mut self.layer_stack);
             let r = process_batch_values::<Backward, P>(
                 &mut ctx,
                 start_bound,
-                start_bound_ikey,
+                cursor_bound,
                 visitor,
                 count,
                 &mut self.flags,
@@ -1456,7 +1483,6 @@ pub trait ReverseBatchStrategy<P: LeafPolicy> {
         &mut self,
         ctx: &mut ReverseScanCtx<P>,
         start_bound: &RangeBound<'_>,
-        start_bound_ikey: Option<u64>,
         count: &mut usize,
     ) -> LeafBatchResultBack;
 }
@@ -1473,7 +1499,6 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
         &mut self,
         strategy: &mut S,
         start_bound: &RangeBound<'_>,
-        start_bound_ikey: Option<u64>,
         guard: &LocalGuard<'_>,
     ) -> usize {
         let mut count: usize = 0;
@@ -1545,7 +1570,7 @@ impl<P: LeafPolicy> ReverseScanCtx<P> {
             }
 
             // Hot path: process leaf batch in reverse
-            let result = strategy.process_leaf(self, start_bound, start_bound_ikey, &mut count);
+            let result = strategy.process_leaf(self, start_bound, &mut count);
 
             match result {
                 LeafBatchResultBack::LeafExhausted => {
@@ -1639,10 +1664,9 @@ where
         &mut self,
         ctx: &mut ReverseScanCtx<P>,
         start_bound: &RangeBound<'_>,
-        start_bound_ikey: Option<u64>,
         count: &mut usize,
     ) -> LeafBatchResultBack {
-        ctx.process_prev_leaf_batch_ptr(start_bound, start_bound_ikey, self.visitor, count)
+        ctx.process_prev_leaf_batch_ptr(start_bound, self.visitor, count)
     }
 }
 
@@ -1697,10 +1721,9 @@ where
         &mut self,
         ctx: &mut ReverseScanCtx<P>,
         start_bound: &RangeBound<'_>,
-        start_bound_ikey: Option<u64>,
         count: &mut usize,
     ) -> LeafBatchResultBack {
-        ctx.process_prev_leaf_batch(start_bound, start_bound_ikey, self.visitor, count)
+        ctx.process_prev_leaf_batch(start_bound, self.visitor, count)
     }
 }
 
@@ -1752,12 +1775,8 @@ where
         &mut self,
         ctx: &mut ReverseScanCtx<P>,
         start_bound: &RangeBound<'_>,
-        _start_bound_ikey: Option<u64>,
         count: &mut usize,
     ) -> LeafBatchResultBack {
-        // Layer-aware ikey extraction: align start-bound ikey with the current
-        // trie depth so descended scans compare sublayer ikeys correctly.
-        let start_bound_ikey: Option<u64> = start_bound.extract_ikey_at(ctx.cursor_key.offset());
-        ctx.process_prev_leaf_batch_values(start_bound, start_bound_ikey, self.visitor, count)
+        ctx.process_prev_leaf_batch_values(start_bound, self.visitor, count)
     }
 }

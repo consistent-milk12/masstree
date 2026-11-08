@@ -29,7 +29,7 @@ mod unit_tests;
 // ============================================================================
 
 pub use adapters::{KeysIter, ValuesIter};
-pub use range_bound::RangeBound;
+pub use range_bound::{CursorBound, RangeBound};
 pub use scan_entry::ScanEntry;
 
 // ============================================================================

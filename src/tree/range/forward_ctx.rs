@@ -858,19 +858,20 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     pub fn process_leaf_batch_ptr<F>(
         &mut self,
         end_bound: &RangeBound<'_>,
-        end_bound_ikey: Option<u64>,
         visitor: &mut F,
         count: &mut usize,
     ) -> LeafBatchResult
     where
         F: FnMut(&[u8], &P::Value) -> bool,
     {
+        let cursor_bound = end_bound.cursor_bound(&self.cursor_key, true);
+        let before: usize = *count;
         let (result, ki, root) = {
             let mut ctx = self.build_batch_ctx();
             let r = process_batch_keyed::<Forward, _, P>(
                 &mut ctx,
                 end_bound,
-                end_bound_ikey,
+                cursor_bound,
                 &mut RefSlotVisitor(visitor),
                 count,
                 &mut (),
@@ -879,6 +880,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         };
         self.stack.set_ki(ki.cast_unsigned());
         self.stack.set_root(root);
+
+        if *count > before {
+            self.flags.mark_cursor_emitted();
+        }
+
         result
     }
 
@@ -887,19 +893,20 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     pub fn process_leaf_batch<F>(
         &mut self,
         end_bound: &RangeBound<'_>,
-        end_bound_ikey: Option<u64>,
         visitor: &mut F,
         count: &mut usize,
     ) -> LeafBatchResult
     where
         F: FnMut(&[u8], P::Output) -> bool,
     {
+        let cursor_bound = end_bound.cursor_bound(&self.cursor_key, true);
+        let before: usize = *count;
         let (result, ki, root) = {
             let mut ctx = self.build_batch_ctx();
             let r = process_batch_keyed::<Forward, _, P>(
                 &mut ctx,
                 end_bound,
-                end_bound_ikey,
+                cursor_bound,
                 &mut CopySlotVisitor(visitor),
                 count,
                 &mut (),
@@ -908,6 +915,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         };
         self.stack.set_ki(ki.cast_unsigned());
         self.stack.set_root(root);
+
+        if *count > before {
+            self.flags.mark_cursor_emitted();
+        }
+
         result
     }
 
@@ -916,16 +928,17 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
     pub fn process_leaf_batch_values(
         &mut self,
         end_bound: &RangeBound<'_>,
-        end_bound_ikey: Option<u64>,
         visitor: &mut impl FnMut(P::Output) -> bool,
         count: &mut usize,
     ) -> LeafBatchResult {
+        let cursor_bound = end_bound.cursor_bound(&self.cursor_key, true);
+        let before: usize = *count;
         let (result, ki, root) = {
             let mut ctx = self.build_batch_ctx();
             let r = process_batch_values::<Forward, P>(
                 &mut ctx,
                 end_bound,
-                end_bound_ikey,
+                cursor_bound,
                 visitor,
                 count,
                 &mut (),
@@ -934,6 +947,11 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         };
         self.stack.set_ki(ki.cast_unsigned());
         self.stack.set_root(root);
+
+        if *count > before {
+            self.flags.mark_cursor_emitted();
+        }
+
         result
     }
 
@@ -1033,6 +1051,10 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
         if self.state == ScanState::Emit {
             match strategy.emit_initial(self, end_bound, &mut count) {
                 BatchAction::Continue => {
+                    if count > 0 {
+                        self.flags.mark_cursor_emitted();
+                    }
+
                     self.state = ScanState::FindNext;
                 }
 
@@ -1125,16 +1147,12 @@ impl<P: LeafPolicy> ForwardScanCtx<P> {
 /// Used by [`RangeIter::for_each_intra_leaf_batch_ref`].
 pub struct IntraLeafRefStrategy<'a, F> {
     visitor: &'a mut F,
-    end_bound_ikey: Option<u64>,
 }
 
 impl<'a, F> IntraLeafRefStrategy<'a, F> {
     #[inline]
-    pub const fn new(visitor: &'a mut F, end_bound_ikey: Option<u64>) -> Self {
-        Self {
-            visitor,
-            end_bound_ikey,
-        }
+    pub const fn new(visitor: &'a mut F) -> Self {
+        Self { visitor }
     }
 }
 
@@ -1213,7 +1231,7 @@ where
         _guard: &LocalGuard<'_>,
         count: &mut usize,
     ) -> LeafBatchResult {
-        ctx.process_leaf_batch_ptr(end_bound, self.end_bound_ikey, self.visitor, count)
+        ctx.process_leaf_batch_ptr(end_bound, self.visitor, count)
     }
 }
 
@@ -1222,16 +1240,12 @@ where
 /// Used by [`RangeIter::for_each_intra_leaf_batch`].
 pub struct IntraLeafCopyStrategy<'a, F> {
     visitor: &'a mut F,
-    end_bound_ikey: Option<u64>,
 }
 
 impl<'a, F> IntraLeafCopyStrategy<'a, F> {
     #[inline]
-    pub const fn new(visitor: &'a mut F, end_bound_ikey: Option<u64>) -> Self {
-        Self {
-            visitor,
-            end_bound_ikey,
-        }
+    pub const fn new(visitor: &'a mut F) -> Self {
+        Self { visitor }
     }
 }
 
@@ -1307,7 +1321,7 @@ where
         _guard: &LocalGuard<'_>,
         count: &mut usize,
     ) -> LeafBatchResult {
-        ctx.process_leaf_batch(end_bound, self.end_bound_ikey, self.visitor, count)
+        ctx.process_leaf_batch(end_bound, self.visitor, count)
     }
 }
 
@@ -1393,11 +1407,7 @@ where
         _guard: &LocalGuard<'_>,
         count: &mut usize,
     ) -> LeafBatchResult {
-        // Layer-aware ikey extraction: align end-bound ikey with the current
-        // trie depth so descended scans compare sublayer ikeys correctly.
-        let end_bound_ikey: Option<u64> = end_bound.extract_ikey_at(ctx.cursor_key.offset());
-
-        ctx.process_leaf_batch_values(end_bound, end_bound_ikey, self.visitor, count)
+        ctx.process_leaf_batch_values(end_bound, self.visitor, count)
     }
 }
 

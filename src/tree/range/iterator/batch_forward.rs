@@ -237,9 +237,8 @@ where
                 return 0;
             }
         }
-        let end_bound_ikey: Option<u64> = self.end_bound.extract_ikey();
         self.fwd.run_batch(
-            &mut IntraLeafRefStrategy::new(&mut visitor, end_bound_ikey),
+            &mut IntraLeafRefStrategy::new(&mut visitor),
             &self.end_bound,
             self.guard,
         )
@@ -266,9 +265,8 @@ where
                 return 0;
             }
         }
-        let end_bound_ikey: Option<u64> = self.end_bound.extract_ikey();
         self.fwd.run_batch(
-            &mut IntraLeafCopyStrategy::new(&mut visitor, end_bound_ikey),
+            &mut IntraLeafCopyStrategy::new(&mut visitor),
             &self.end_bound,
             self.guard,
         )

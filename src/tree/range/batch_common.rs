@@ -18,6 +18,7 @@ use super::find::LeafBatchResult;
 use super::find_rev::LeafBatchResultBack;
 use super::iterator::RangeBound;
 use super::iterator::iter_flags::ReverseFlags;
+use super::iterator::CursorBound;
 use super::scan_state::{LayerContext, LayerStack, ScanSnapshot, ScanSnapshotPtr};
 
 /// Build the full key in `cursor_key` from slot data.
@@ -29,10 +30,30 @@ pub fn build_slot_key<P: LeafPolicy>(
     slot_ikey: u64,
     slot_keylenx: u8,
 ) {
+    let suffix: Option<&[u8]> = if slot_keylenx == KSUF_KEYLENX {
+        leaf.ksuf(slot)
+    } else {
+        None
+    };
+
+    build_slot_key_parts(cursor_key, slot_ikey, slot_keylenx, suffix);
+}
+
+/// Build the full key from an already-snapshotted slot.
+///
+/// The caller must have validated the leaf version after reading the
+/// snapshot, so this never re-reads a slot that a writer may have reused.
+#[inline(always)]
+pub fn build_slot_key_parts(
+    cursor_key: &mut CursorKey,
+    slot_ikey: u64,
+    slot_keylenx: u8,
+    suffix: Option<&[u8]>,
+) {
     cursor_key.assign_store_ikey(slot_ikey);
 
     if slot_keylenx == KSUF_KEYLENX {
-        if let Some(suffix) = leaf.ksuf(slot) {
+        if let Some(suffix) = suffix {
             let suffix_len = suffix.len();
             let _ = cursor_key.assign_store_suffix(suffix);
             cursor_key.assign_store_length(IKEY_SIZE + suffix_len);
@@ -331,6 +352,7 @@ impl BatchDirection for Backward {
     #[inline(always)]
     fn on_pre_emit(flags: &mut ReverseFlags) {
         flags.clear_upper_bound();
+        flags.mark_cursor_emitted();
     }
 
     #[inline(always)]
@@ -380,7 +402,7 @@ pub struct BatchCtx<'a, P: LeafPolicy> {
 pub fn process_batch_keyed<D, V, P>(
     ctx: &mut BatchCtx<'_, P>,
     bound: &RangeBound<'_>,
-    bound_ikey: Option<u64>,
+    cursor_bound: CursorBound,
     slot_visitor: &mut V,
     count: &mut usize,
     flags: &mut D::Flags,
@@ -401,9 +423,26 @@ where
 
         D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, &ctx.perm);
 
-        // Layer pointer check
+        // Phase 1: speculative reads only. Neither the cursor nor the layer
+        // stack may change until the version check below succeeds, otherwise a
+        // retry would reposition from a slot the scan never emitted.
         if unlikely(slot_keylenx >= LAYER_KEYLENX) {
             let layer_ptr: *mut u8 = ctx.leaf.load_layer_raw(slot);
+
+            if ctx.leaf.version().has_changed(ctx.cached_version) {
+                return D::version_changed();
+            }
+
+            match cursor_bound {
+                CursorBound::Outside => return D::bound_exceeded(),
+
+                CursorBound::At(b_ikey) if slot_ikey.cmp(&b_ikey) == D::exceeded_ordering() => {
+                    return D::bound_exceeded();
+                }
+
+                CursorBound::At(_) | CursorBound::Inside => {}
+            }
+
             ctx.layer_stack
                 .push(LayerContext::new(ctx.root, ctx.leaf_ptr));
             ctx.cursor_key.assign_store_ikey(slot_ikey);
@@ -413,47 +452,44 @@ where
             return D::layer_encountered();
         }
 
-        // Empty value check
+        // Empty value check: validate before skipping so a concurrent
+        // remove/reuse turns into a retry instead of a silently lost entry.
         if unlikely(ctx.leaf.is_value_empty_relaxed(slot)) {
+            if ctx.leaf.version().has_changed(ctx.cached_version) {
+                return D::version_changed();
+            }
+
             ctx.ki = D::step(ctx.ki);
             continue;
         }
 
-        // Fast bound pre-check using ikey
-        let mut needs_full_bound_check = true;
+        // Snapshot the suffix before validation; key construction must not
+        // re-read a slot a writer may have reused in the meantime.
+        let suffix: Option<&[u8]> = if slot_keylenx == KSUF_KEYLENX {
+            ctx.leaf.ksuf(slot)
+        } else {
+            None
+        };
 
-        if bound_ikey.is_none() {
-            needs_full_bound_check = false;
-        } else if ctx.cursor_key.is_at_root_layer()
-            && let Some(b_ikey) = bound_ikey
-        {
-            match slot_ikey.cmp(&b_ikey) {
-                ord if ord == D::exceeded_ordering() => return D::bound_exceeded(),
-
-                Ordering::Equal => {}
-                _ => needs_full_bound_check = false,
-            }
-        }
-
-        // Build key
-        build_slot_key(ctx.cursor_key, ctx.leaf, slot, slot_ikey, slot_keylenx);
-        ctx.cursor_key.mark_key_complete();
-
-        D::on_pre_emit(flags);
-
-        // Full key bound check
-        let key: &[u8] = ctx.cursor_key.full_key();
-        if needs_full_bound_check && !D::key_in_bound(bound, key) {
-            return D::bound_exceeded();
-        }
-
-        // Validate after building the key and before exposing the value:
-        // the cached permutation can point at a slot reused by a writer.
+        // Phase 2: OCC validation. On failure the cursor still holds the last
+        // validly emitted key, so the retry repositions correctly.
         if ctx.leaf.version().has_changed(ctx.cached_version) {
             return D::version_changed();
         }
 
-        // Visit slot
+        // Phase 3: commit the validated snapshot and check the full-key bound.
+        build_slot_key_parts(ctx.cursor_key, slot_ikey, slot_keylenx, suffix);
+        ctx.cursor_key.mark_key_complete();
+
+        let key: &[u8] = ctx.cursor_key.full_key();
+        if !D::key_in_bound(bound, key) {
+            return D::bound_exceeded();
+        }
+
+        D::on_pre_emit(flags);
+
+        // Visit slot. The visitor re-reads the value; its null result handles
+        // a value removed between validation and the load.
         match slot_visitor.visit(ctx.leaf, slot, key) {
             None => {
                 ctx.ki = D::step(ctx.ki);
@@ -486,7 +522,7 @@ where
 pub fn process_batch_values<D, P>(
     ctx: &mut BatchCtx<'_, P>,
     bound: &RangeBound<'_>,
-    bound_ikey: Option<u64>,
+    cursor_bound: CursorBound,
     visitor: &mut impl FnMut(P::Output) -> bool,
     count: &mut usize,
     flags: &mut D::Flags,
@@ -506,18 +542,26 @@ where
 
         D::prefetch_neighbor::<P>(ctx.ki, ctx.leaf, &ctx.perm);
 
-        // A layer pointer cannot be converted to a full key. Check its ikey
-        // against the bound *before* descending: a layer wholly outside the
-        // range must not contribute values. When the ikey equals the bound,
-        // the layer may still contain in-range continuations, so descend.
+        // Phase 1: speculative reads only. A layer pointer cannot be converted
+        // to a full key, so its ikey decides whether descending can contribute
+        // values. Validate before mutating the stack or cursor.
         if unlikely(slot_keylenx >= LAYER_KEYLENX) {
-            if let Some(b_ikey) = bound_ikey
-                && slot_ikey.cmp(&b_ikey) == D::exceeded_ordering()
-            {
-                return D::bound_exceeded();
+            let layer_ptr: *mut u8 = ctx.leaf.load_layer_raw(slot);
+
+            if ctx.leaf.version().has_changed(ctx.cached_version) {
+                return D::version_changed();
             }
 
-            let layer_ptr: *mut u8 = ctx.leaf.load_layer_raw(slot);
+            match cursor_bound {
+                CursorBound::Outside => return D::bound_exceeded(),
+
+                CursorBound::At(b_ikey) if slot_ikey.cmp(&b_ikey) == D::exceeded_ordering() => {
+                    return D::bound_exceeded();
+                }
+
+                CursorBound::At(_) | CursorBound::Inside => {}
+            }
+
             ctx.layer_stack
                 .push(LayerContext::new(ctx.root, ctx.leaf_ptr));
             ctx.cursor_key.assign_store_ikey(slot_ikey);
@@ -527,69 +571,64 @@ where
             return D::layer_encountered();
         }
 
-        // Empty value check
+        // Empty value check: validate before skipping.
         if unlikely(ctx.leaf.is_value_empty_relaxed(slot)) {
+            if ctx.leaf.version().has_changed(ctx.cached_version) {
+                return D::version_changed();
+            }
+
             ctx.ki = D::step(ctx.ki);
             continue;
         }
 
-        // Fast ikey bound check. A full-key comparison is only needed when
-        // the slot shares the bound's 8-byte ikey (or when the bound has no
-        // complete ikey at this layer); every interior slot is ordered by its
-        // ikey alone. This keeps values-only scans free of per-slot key
-        // materialization in the common unbounded/interior case.
+        // Snapshot the suffix and the value before validation. Reading the
+        // value first is the correct OCC order: the version check covers both
+        // the key metadata and the payload.
+        let suffix: Option<&[u8]> = if slot_keylenx == KSUF_KEYLENX {
+            ctx.leaf.ksuf(slot)
+        } else {
+            None
+        };
+        let output: Option<P::Output> = ctx.leaf.load_value(slot);
+
+        if ctx.leaf.version().has_changed(ctx.cached_version) {
+            return D::version_changed();
+        }
+
+        // Fast ikey bound check. A full-key comparison is only needed when the
+        // slot shares the bound's 8-byte ikey; every interior slot is ordered
+        // by its ikey alone. `CursorBound::Inside` means the whole sublayer is
+        // in range, so no check is needed at all.
         let mut needs_full_bound: bool = false;
 
-        if let Some(b_ikey) = bound_ikey {
-            match slot_ikey.cmp(&b_ikey) {
+        match cursor_bound {
+            CursorBound::Outside => return D::bound_exceeded(),
+
+            CursorBound::At(b_ikey) => match slot_ikey.cmp(&b_ikey) {
                 ord if ord == D::exceeded_ordering() => return D::bound_exceeded(),
                 Ordering::Equal => needs_full_bound = true,
                 _ => {}
-            }
-        } else if !bound.is_unbounded() {
-            needs_full_bound = true;
+            },
+
+            CursorBound::Inside => {}
         }
 
-        // Record the current slot in the cursor without rebuilding the whole
+        // Record the validated slot in the cursor without rebuilding the whole
         // key. Inline slots need only the ikey and length; suffix slots copy
         // their suffix so a cold retry can reposition exactly.
-        ctx.cursor_key.assign_store_ikey(slot_ikey);
-
-        if slot_keylenx == KSUF_KEYLENX {
-            if let Some(suffix) = ctx.leaf.ksuf(slot) {
-                let _ = ctx.cursor_key.assign_store_suffix(suffix);
-                ctx.cursor_key.assign_store_length(IKEY_SIZE + suffix.len());
-            } else {
-                ctx.cursor_key.assign_store_length(IKEY_SIZE);
-            }
-        } else {
-            ctx.cursor_key
-                .assign_store_length(usize::from(slot_keylenx));
-        }
-
+        build_slot_key_parts(ctx.cursor_key, slot_ikey, slot_keylenx, suffix);
         ctx.cursor_key.mark_key_complete();
 
         if needs_full_bound && !D::key_in_bound(bound, ctx.cursor_key.full_key()) {
             return D::bound_exceeded();
         }
 
-        // Validate before exposing the value: a slot can be reused after the
-        // cached permutation/version was captured.
-        if ctx.leaf.version().has_changed(ctx.cached_version) {
-            return D::version_changed();
-        }
-
         D::on_pre_emit(flags);
 
-        let Some(output) = ctx.leaf.load_value(slot) else {
+        let Some(output) = output else {
             ctx.ki = D::step(ctx.ki);
             continue;
         };
-
-        // Validate again after the complete payload read.
-        if ctx.leaf.version().has_changed(ctx.cached_version) {
-            return D::version_changed();
-        }
 
         *count += 1;
         ctx.ki = D::step(ctx.ki);

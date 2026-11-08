@@ -170,6 +170,7 @@ impl ReverseFlags {
     const EMIT_EQUAL: u8 = 1 << 2;
     const NEEDS_DUPLICATE_CHECK: u8 = 1 << 3;
     const UPPER_BOUND: u8 = 1 << 4;
+    const CURSOR_EMITTED: u8 = 1 << 5;
 
     /// Create new flags with all bits cleared.
     #[inline(always)]
@@ -224,6 +225,12 @@ impl ReverseFlags {
     #[inline(always)]
     pub const fn upper_bound(self) -> bool {
         self.0 & Self::UPPER_BOUND != 0
+    }
+
+    /// Whether the cursor currently holds a key this scan already emitted.
+    #[inline(always)]
+    pub const fn cursor_emitted(self) -> bool {
+        self.0 & Self::CURSOR_EMITTED != 0
     }
 
     // ========================================================================
@@ -286,5 +293,18 @@ impl ReverseFlags {
     #[inline(always)]
     pub const fn clear_upper_bound(&mut self) {
         self.0 &= !Self::UPPER_BOUND;
+    }
+
+    /// Record that the cursor now holds an emitted key.
+    #[inline(always)]
+    pub const fn mark_cursor_emitted(&mut self) {
+        self.0 |= Self::CURSOR_EMITTED;
+    }
+
+    /// Record that the cursor was reset to a positional boundary that has not
+    /// been emitted yet (a fresh sublayer or a previous leaf's lower bound).
+    #[inline(always)]
+    pub const fn clear_cursor_emitted(&mut self) {
+        self.0 &= !Self::CURSOR_EMITTED;
     }
 }

@@ -331,6 +331,28 @@ impl ReverseScanHelper {
         }
     }
 
+    /// Find the last position strictly before the cursor for a reverse scan.
+    ///
+    /// Used when the cursor already holds an emitted key, so a retry must not
+    /// re-emit it. A "fresh sublayer from maximum" scan still starts at the
+    /// last slot.
+    #[inline]
+    pub fn lower_reverse_strict<P>(
+        cursor_key: &CursorKey,
+        leaf: &LeafNode15<P>,
+        perm: &<LeafNode15<P> as TreeLeafNode<P>>::Perm,
+        upper_bound: bool,
+    ) -> isize
+    where
+        P: LeafPolicy,
+    {
+        if upper_bound {
+            return perm.size().cast_signed() - 1;
+        }
+
+        upper_bound_reverse_full(cursor_key, leaf, perm, false)
+    }
+
     /// Find the last position at or before the cursor for a reverse scan.
     ///
     /// When `upper_bound` is true, returns `size - 1` (start from last slot).

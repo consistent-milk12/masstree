@@ -39,17 +39,10 @@ where
             }
         }
 
-        let start_bound_ikey: Option<u64> = self.start_bound.extract_ikey();
-
         // SAFETY: rev is Some after initialize_back
         let rev = unsafe { self.rev.as_mut().unwrap_unchecked() };
         let mut strategy = RevIntraLeafRefStrategy::new(&mut visitor);
-        rev.run_batch_reverse(
-            &mut strategy,
-            &self.start_bound,
-            start_bound_ikey,
-            self.guard,
-        )
+        rev.run_batch_reverse(&mut strategy, &self.start_bound, self.guard)
     }
 
     /// Reverse intra-leaf batch iteration returning values by copy.
@@ -73,17 +66,10 @@ where
             }
         }
 
-        let start_bound_ikey: Option<u64> = self.start_bound.extract_ikey();
-
         // SAFETY: rev is Some after initialize_back
         let rev = unsafe { self.rev.as_mut().unwrap_unchecked() };
         let mut strategy = RevIntraLeafCopyStrategy::new(&mut visitor);
-        rev.run_batch_reverse(
-            &mut strategy,
-            &self.start_bound,
-            start_bound_ikey,
-            self.guard,
-        )
+        rev.run_batch_reverse(&mut strategy, &self.start_bound, self.guard)
     }
 
     /// Reverse value-only batch iteration — fastest when keys aren't needed.
@@ -110,16 +96,9 @@ where
             }
         }
 
-        let start_bound_ikey: Option<u64> = self.start_bound.extract_ikey();
-
         // SAFETY: rev is Some after initialize_back
         let rev = unsafe { self.rev.as_mut().unwrap_unchecked() };
         let mut strategy = RevValuesOnlyStrategy::new(&mut visitor);
-        rev.run_batch_reverse(
-            &mut strategy,
-            &self.start_bound,
-            start_bound_ikey,
-            self.guard,
-        )
+        rev.run_batch_reverse(&mut strategy, &self.start_bound, self.guard)
     }
 }

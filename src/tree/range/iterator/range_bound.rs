@@ -2,9 +2,31 @@
 //!
 //! Range bound type for scan operations.
 
+use std::cmp::Ordering;
 use std::ops::Bound;
 
 use crate::key::IKEY_SIZE;
+use crate::tree::range::cursor_key::CursorKey;
+
+/// How a bound applies to the sublayer the cursor is currently in.
+///
+/// A bound's next 8 bytes can only order slots inside a sublayer when the
+/// sublayer's prefix equals the bound's prefix. Otherwise the entire sublayer
+/// is either wholly inside or wholly outside the bound, and per-slot checks are
+/// both unnecessary and wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorBound {
+    /// No per-slot check is needed: the bound is unbounded, or every key in
+    /// this sublayer is inside it.
+    Inside,
+
+    /// Compare slot ikeys against this value (the bound's bytes at the
+    /// current offset).
+    At(u64),
+
+    /// Every key in this sublayer is outside the bound.
+    Outside,
+}
 
 /// Range bound for scan operations.
 ///
@@ -156,6 +178,76 @@ impl<'a> RangeBound<'a> {
 
             RangeBound::Included(bound) | RangeBound::Excluded(bound) => {
                 Some(Self::key_to_ikey_at(bound, offset))
+            }
+        }
+    }
+
+    /// Resolve how this bound applies inside the cursor's current sublayer.
+    ///
+    /// `forward` selects end-bound semantics (`contains`) when true and
+    /// start-bound semantics (`contains_reverse`) when false.
+    ///
+    /// The next 8 bound bytes are meaningful only when the sublayer's prefix
+    /// matches the bound's prefix. If the sublayer's prefix is lexicographically
+    /// before the bound, a forward scan may still enter it but a reverse scan
+    /// never can (and vice versa), so the whole sublayer is classified without
+    /// per-slot work.
+    #[must_use]
+    #[inline]
+    pub fn cursor_bound(&self, cursor: &CursorKey, forward: bool) -> CursorBound {
+        let Some(bound) = self.key() else {
+            return CursorBound::Inside;
+        };
+
+        let offset: usize = cursor.offset();
+
+        if offset == 0 {
+            // SAFETY: a bounded key always yields an ikey at offset 0.
+            return CursorBound::At(self.extract_ikey_at(0).expect("bounded key has an ikey"));
+        }
+
+        let consumed: &[u8] = &cursor.full_key()[..offset];
+        let common: usize = offset.min(bound.len());
+
+        match consumed[..common].cmp(&bound[..common]) {
+            // The sublayer prefix is below the bound.
+            Ordering::Less => {
+                if forward {
+                    CursorBound::Inside
+                } else {
+                    CursorBound::Outside
+                }
+            }
+
+            // The sublayer prefix is above the bound.
+            Ordering::Greater => {
+                if forward {
+                    CursorBound::Outside
+                } else {
+                    CursorBound::Inside
+                }
+            }
+
+            Ordering::Equal => {
+                if bound.len() > offset {
+                    // The bound continues inside this sublayer.
+                    // SAFETY: bound has at least 8 bytes at `offset`
+                    // only when `bound.len() - offset >= 8`; a shorter tail
+                    // is zero-padded by key_to_ikey_at.
+                    CursorBound::At(
+                        self.extract_ikey_at(offset)
+                            .expect("bounded key has an ikey"),
+                    )
+                } else if forward {
+                    // The end bound ends at (or before) this prefix. Every key
+                    // in the sublayer has this prefix plus more bytes, so all
+                    // of them sort strictly after the bound.
+                    CursorBound::Outside
+                } else {
+                    // The start bound ends at this prefix. Every key in the
+                    // sublayer is strictly greater than it.
+                    CursorBound::Inside
+                }
             }
         }
     }
