@@ -430,6 +430,14 @@ where
                 let child_version: &NodeVersion = unsafe { &*(child.cast::<NodeVersion>()) };
                 v[other] = child_version.stable();
 
+                // A cascade can leave a DELETED internode linked until the
+                // parent update completes (or after RetryExhausted). Descending
+                // into it would route into a zero-key node with a null child
+                // and spin forever. Restart from the root instead.
+                if child_version.is_deleted() {
+                    continue 'retry;
+                }
+
                 if likely(!inode.version().has_changed(v[sense])) {
                     sense = other;
                     continue;
