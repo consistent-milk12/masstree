@@ -1,14 +1,14 @@
 //! Deferred cleanup queue for empty leaves.
 //!
-//! Two queue types: chain entries (pointer-based, for non-sublayer leaves) and
-//! sublayer entries (route-based, re-traverse from root). The queued bit in
-//! modstate deduplicates enqueue at the source.
+//! Two queue types: chain entries identify an empty leaf by `ikey_bound` and
+//! re-traverse from the root, and sublayer entries carry a per-layer route.
+//! Neither stores a raw node pointer, so an entry can safely outlive the
+//! maintenance call that queued it. The queued bit in modstate deduplicates
+//! enqueue at the source.
 //!
 //! Deferred queues spread retries across maintenance calls. All requeues target
 //! the deferred queue (not the main queue), ensuring each entry gets exactly one
-//! attempt per maintenance call. Deferred chain entries store only `ikey_bound`
-//! (no pointer) and re-traverse from root on retry, avoiding cross-call pointer
-//! lifetime issues.
+//! attempt per maintenance call.
 
 use std::fmt::{self as StdFmt, Debug, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -43,21 +43,11 @@ const MAX_REQUEUE_COUNT: u8 = 10;
 /// Maximum B-link chain hops during GC re-traversal.
 const MAX_GC_BLINK_HOPS: usize = 64;
 
-/// Non-sublayer empty leaf pending chain unlink.
-/// Only dereferenced in the same maintenance call that popped the entry.
-#[derive(Debug, Clone)]
-struct ChainEntry {
-    /// Type-erased pointer to the empty leaf.
-    leaf_ptr: *mut u8,
-
-    ikey_bound: u64,
-
-    requeue_count: u8,
-}
-
-/// Chain entry deferred to the next maintenance call.
-/// Stores only the key range identifier, not the leaf pointer.
-/// Re-traverses from root on retry to avoid cross-call pointer lifetime issues.
+/// Chain entry identifying an empty leaf by its routing lower bound.
+///
+/// Stores no pointer: the leaf is re-found from the root under the current
+/// guard. This is what makes deferred cleanup safe across calls and immune to
+/// duplicate entries for a leaf that was emptied, reused, and emptied again.
 #[derive(Debug, Clone)]
 struct DeferredChainEntry {
     ikey_bound: u64,
@@ -79,7 +69,7 @@ struct SublayerEntry {
 
 /// Lock-free queue of empty leaves pending cleanup.
 pub struct CoalesceQueue {
-    chains: SegQueue<ChainEntry>,
+    chains: SegQueue<DeferredChainEntry>,
 
     sublayers: SegQueue<SublayerEntry>,
 
@@ -93,16 +83,8 @@ pub struct CoalesceQueue {
     abandoned: AtomicUsize,
 }
 
-// SAFETY: CoalesceQueue requires unsafe Send/Sync because the `chains` field
-// contains ChainEntry with *mut u8 (which is !Send). The pointer is only
-// dereferenced under proper synchronization (seize guard + leaf lock) within
-// the same maintenance call that popped the entry.
-// The deferred_chains field contains DeferredChainEntry (u64 + u8), which is
-// trivially Send+Sync. The `sublayers` and `deferred_sublayers` fields contain
-// SublayerEntry (Vec<u64> + u8), which is trivially Send+Sync.
-#[allow(clippy::non_send_fields_in_send_ty)]
-unsafe impl Send for CoalesceQueue {}
-unsafe impl Sync for CoalesceQueue {}
+// All queue entries are plain data (`u64`/`Vec<u64>` plus a retry counter),
+// so CoalesceQueue is automatically Send + Sync.
 
 impl Default for CoalesceQueue {
     fn default() -> Self {
@@ -123,10 +105,11 @@ impl CoalesceQueue {
     }
 
     /// Schedule a non-sublayer empty leaf for chain coalesce.
+    ///
+    /// Identified by its routing lower bound; no pointer is stored.
     #[inline(always)]
-    pub fn schedule_chain(&self, leaf_ptr: *mut u8, ikey_bound: u64) {
-        self.chains.push(ChainEntry {
-            leaf_ptr,
+    pub fn schedule_chain(&self, ikey_bound: u64) {
+        self.chains.push(DeferredChainEntry {
             ikey_bound,
             requeue_count: 0,
         });
@@ -317,12 +300,13 @@ impl Coalesce {
             );
         }
 
-        // Step 3: Immediate chain entries (same guard scope, pointer-based).
+        // Step 3: Chain entries. These also re-traverse from the root; there
+        // is no pointer fast path, so stale entries cannot dereference reused
+        // or reclaimed nodes.
         if let Some(entry) = queue.chains.pop() {
-            return Self::try_remove_chain::<P, A>(
+            return Self::try_remove_chain_deferred::<P, A>(
                 tree,
                 queue,
-                entry.leaf_ptr,
                 entry.ikey_bound,
                 entry.requeue_count,
                 guard,
@@ -336,77 +320,11 @@ impl Coalesce {
     //  Chain coalesce (non-sublayer leaves)
     // ========================================================================
 
-    /// Process a chain entry: non-sublayer empty leaf pending unlink.
-    ///
-    /// Uses parent-before-delete ordering: parent cleanup happens
-    /// while the leaf is still alive, linked, and not deleted. On failure the
-    /// leaf is unchanged and can be safely requeued without pointer storage.
-    fn try_remove_chain<P, A>(
-        tree: &MassTreeGeneric<P, A>,
-        queue: &CoalesceQueue,
-        leaf_ptr_erased: *mut u8,
-        ikey_bound: u64,
-        requeue_count: u8,
-        guard: &LocalGuard<'_>,
-    ) -> bool
-    where
-        P: LeafPolicy,
-        A: TreeAllocator<P>,
-    {
-        let leaf_ptr: *mut LeafNode15<P> = leaf_ptr_erased.cast();
-
-        // SAFETY: leaf_ptr is valid, protected by guard (same maintenance call).
-        let leaf: &LeafNode15<P> = unsafe { &*leaf_ptr };
-
-        let Some(mut lock) = leaf.version().try_lock() else {
-            Self::requeue_chain(queue, ikey_bound, requeue_count);
-            return true;
-        };
-
-        if leaf.size() > 0 {
-            drop(lock);
-            return true;
-        }
-
-        if leaf.deleted_layer() {
-            drop(lock);
-            return true;
-        }
-
-        if leaf.prev(guard).is_null() {
-            // Leftmost leaf: cannot unlink. Clear queued bit so it is not
-            // permanntly stuck on a leaf that can never be coalesced.
-            leaf.clear_queued();
-            drop(lock);
-            return true;
-        }
-
-        // PARENT CLEANUP BEFORE DELETE
-        // ----------------------------
-        // Remove the leaf from its immediate parent while the leaf is still
-        // alive, linked and not deleted. On failure, the leaf is unchanged
-        // and can be safely requeued.
-        Self::finish_chain_coalesce::<P, A>(
-            tree,
-            queue,
-            leaf,
-            leaf_ptr,
-            ikey_bound,
-            requeue_count,
-            &mut lock,
-            guard,
-        );
-
-        true
-    }
-
     /// Process a deferred chain entry by re-traversing from root.
     ///
     /// Deferred entries store only `ikey_bound` (no pointer). Re-traversal
     /// from root finds the leaf under the current guard, avoiding cross-call
     /// pointer lifetime issues.
-    #[cold]
-    #[inline(never)]
     fn try_remove_chain_deferred<P, A>(
         tree: &MassTreeGeneric<P, A>,
         queue: &CoalesceQueue,
@@ -444,7 +362,13 @@ impl Coalesce {
         };
 
         // Full validation (leaf state may have changed since find_chain_leaf).
-        if leaf.size() > 0 || leaf.deleted_layer() {
+        // A duplicate entry can outlive the first coalesce of the same leaf:
+        // the version DELETED bit (not modstate) records chain deletion, so it
+        // must be checked under the lock before unlinking again.
+        if leaf.size() > 0
+            || leaf.deleted_layer()
+            || NodeVersion::is_deleted_version(lock.locked_value())
+        {
             drop(lock);
             return true;
         }
@@ -720,7 +644,7 @@ impl Coalesce {
 
                 queue.schedule_sublayer(parent_route);
             } else {
-                queue.schedule_chain(found.parent_ptr.cast::<u8>(), parent_ikey_bound);
+                queue.schedule_chain(parent_ikey_bound);
             }
         }
 
@@ -938,8 +862,6 @@ impl Coalesce {
 mod tests {
     use super::*;
 
-    use std::ptr;
-
     #[test]
     fn test_queue_basic_operations() {
         let queue: CoalesceQueue = CoalesceQueue::new();
@@ -949,8 +871,8 @@ mod tests {
         assert_eq!(queue.deferred_len(), 0);
         assert_eq!(queue.abandoned(), 0);
 
-        queue.schedule_chain(ptr::null_mut(), 100);
-        queue.schedule_chain(ptr::null_mut(), 200);
+        queue.schedule_chain(100);
+        queue.schedule_chain(200);
 
         assert!(!queue.is_empty());
         assert_eq!(queue.len(), 2);
@@ -962,7 +884,7 @@ mod tests {
     #[test]
     fn test_debug_impl() {
         let queue = CoalesceQueue::new();
-        queue.schedule_chain(ptr::null_mut(), 42);
+        queue.schedule_chain(42);
 
         let debug_str = format!("{queue:?}");
         assert!(debug_str.contains("CoalesceQueue"));
@@ -978,7 +900,7 @@ mod tests {
         queue.schedule_sublayer(vec![0x1234, 0x5678]);
         assert_eq!(queue.len(), 1);
 
-        queue.schedule_chain(ptr::null_mut(), 300);
+        queue.schedule_chain(300);
         assert_eq!(queue.len(), 2);
 
         queue.clear();
@@ -987,14 +909,6 @@ mod tests {
 
     #[test]
     fn test_requeue_count_limit() {
-        let entry: ChainEntry = ChainEntry {
-            leaf_ptr: ptr::null_mut(),
-            ikey_bound: 42,
-            requeue_count: 0,
-        };
-
-        assert_eq!(entry.requeue_count, 0);
-
         let sub_entry: SublayerEntry = SublayerEntry {
             route: vec![1, 2, 3],
             requeue_count: 0,

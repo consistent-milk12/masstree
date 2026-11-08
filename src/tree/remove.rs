@@ -281,7 +281,7 @@ where
 
                 self.tree
                     .coalesce_queue
-                    .schedule_chain(self.leaf.cast::<u8>(), ikey_bound);
+                    .schedule_chain(ikey_bound);
             } else {
                 // Sublayer: schedule route-based gc (no pointers stored).
                 self.tree
