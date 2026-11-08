@@ -126,12 +126,18 @@ impl CoalesceQueue {
         });
     }
 
-    /// Move deferred sublayer entries into the main sublayer queue for
-    /// reprocessing. Deferred chain entries are processed separately
-    /// via `try_remove_chain_deferred` (different type, requires re-traversal).
+    /// Move deferred entries into the main queues for reprocessing.
+    ///
+    /// Called once at the start of each maintenance call. Draining both
+    /// queues keeps a failed entry from being popped again in the same call
+    /// (which would burn its whole retry budget and starve other entries).
     fn drain_deferred(&self) {
         while let Some(entry) = self.deferred_sublayers.pop() {
             self.sublayers.push(entry);
+        }
+
+        while let Some(entry) = self.deferred_chains.pop() {
+            self.chains.push(entry);
         }
     }
 
@@ -273,9 +279,10 @@ impl Coalesce {
 
     /// Try to remove one empty leaf from the queue.
     ///
-    /// Processing order: deferred chains (oldest, re-traverse from root),
-    /// then sublayers (includes freshly-drained deferred sublayers),
-    /// then immediate chains (pointer-based, same guard scope).
+    /// Processing order: sublayers (dead sublayer trees consume memory
+    /// without serving lookups), then chain leaves. Deferred entries were
+    /// drained into these queues at the start of the maintenance call, so a
+    /// failed entry is not re-popped until the next call.
     fn try_remove_one<P, A>(tree: &MassTreeGeneric<P, A>, guard: &LocalGuard<'_>) -> bool
     where
         P: LeafPolicy,
@@ -283,18 +290,7 @@ impl Coalesce {
     {
         let queue: &CoalesceQueue = tree.coalesce_queue();
 
-        // Step 1: Deferred chain entries (re-traverse from root, no pointer).
-        if let Some(entry) = queue.deferred_chains.pop() {
-            return Self::try_remove_chain_deferred::<P, A>(
-                tree,
-                queue,
-                entry.ikey_bound,
-                entry.requeue_count,
-                guard,
-            );
-        }
-
-        // Step 2: Sublayer entries (includes freshly-drained deferred sublayers).
+        // Step 1: Sublayer entries (includes freshly-drained deferred sublayers).
         // Sublayer priority: dead sublayer trees consume memory without
         // serving any lookup. Chain leaves are still part of the B-link
         // chain and serve as routing nodes, so delayed cleanup is less harmful.
@@ -308,7 +304,7 @@ impl Coalesce {
             );
         }
 
-        // Step 3: Chain entries. These also re-traverse from the root; there
+        // Step 2: Chain entries. These also re-traverse from the root; there
         // is no pointer fast path, so stale entries cannot dereference reused
         // or reclaimed nodes.
         if let Some(entry) = queue.chains.pop() {
@@ -1163,11 +1159,11 @@ mod tests {
         assert_eq!(queue.len(), 2);
         assert!(!queue.is_empty());
 
-        // Drain moves sublayers to main queue.
+        // Drain moves both deferred queues to the main queues.
         queue.drain_deferred();
+        assert_eq!(queue.chains.len(), 1);
         assert_eq!(queue.sublayers.len(), 1);
-        // deferred chains stay (processed separately).
-        assert_eq!(queue.deferred_chains.len(), 1);
+        assert_eq!(queue.deferred_chains.len(), 0);
         assert_eq!(queue.deferred_sublayers.len(), 0);
 
         queue.clear();

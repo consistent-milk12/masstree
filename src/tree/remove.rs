@@ -1012,9 +1012,18 @@ impl NodeCleaner {
             let (mut parent_lock, parent_ptr) = match parent_result {
                 LockedParentResult::Locked(lock, ptr) => (lock, ptr),
 
-                LockedParentResult::NoParent | LockedParentResult::RetryExhausted => {
+                LockedParentResult::NoParent => {
                     drop(owned_lock);
                     return;
+                }
+
+                // GC-03: `child[0]` was already cleared from the previous
+                // level. Abandoning the redirect here leaves keys in
+                // [old_ikey, new_ikey) routing to a null child, which spins
+                // forever. Retry acquisition instead of returning.
+                LockedParentResult::RetryExhausted => {
+                    StdHint::spin_loop();
+                    continue;
                 }
             };
 
