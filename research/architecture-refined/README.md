@@ -1,6 +1,6 @@
 # Architecture research evidence
 
-Supporting experiments for [ARCHITECTURERefined.md](../../ARCHITECTURERefined.md).
+Supporting experiments for [ARCHITECTURERefined.md](../../notes/ARCHITECTURERefined.md).
 This standalone Cargo workspace does not change the production crate.
 
 ## Metadata model

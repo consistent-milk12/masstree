@@ -16,16 +16,16 @@ siblings, EBR reclamation, inline or boxed values, and optional suffix storage.
 - Default feature: `debug-print`.
 - Other features: `mimalloc`, `tracing`, `debug-routing`, `no-prefetch`,
   `small-suffix-capacity`, `sidecar-suffix`.
-- Architecture reference: `ARCHITECTURE.md`.
-- Audit findings and fix order: `SystemAudit.md`.
+- Architecture reference: `notes/ARCHITECTURE.md`.
+- Audit findings and fix order: `notes/SystemAudit.md`.
 - Reproducible failure corpus: `failures/` (intentionally failing programs).
 
-Do not assume comments or `ARCHITECTURE.md` are correct. The audit found several
+Do not assume comments or `notes/ARCHITECTURE.md` are correct. The audit found several
 architecture claims contradicted by the code. Verify against source and tests.
 
 ## 2. First steps for any task
 
-1. Read `ARCHITECTURE.md` and the relevant section of `SystemAudit.md`.
+1. Read `notes/ARCHITECTURE.md` and the relevant section of `notes/SystemAudit.md`.
 2. If the task is a bug fix, search `failures/` for an existing reproducer.
    Prefer extending an existing reproducer over writing a new stress test.
 3. Read the actual call paths in `src/`; do not trust names such as
@@ -66,7 +66,7 @@ cargo check --all-targets --no-default-features   # fails on examples/print_tree
 cargo clippy --all-targets --all-features -- -D warnings  # currently 4 errors
 ```
 
-These are tracked in `SystemAudit.md` as `TOOL-01` and `TOOL-04`. Fixing them is
+These are tracked in `notes/SystemAudit.md` as `TOOL-01` and `TOOL-04`. Fixing them is
 welcome, but do not mix unrelated lint cleanup into a correctness fix.
 
 Loom:
@@ -267,7 +267,7 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 
 ## 8. Known audit landmines
 
-Before touching these areas, read the corresponding `SystemAudit.md` finding:
+Before touching these areas, read the corresponding `notes/SystemAudit.md` finding:
 
 | Area | Finding |
 |---|---|
@@ -295,7 +295,7 @@ Before touching these areas, read the corresponding `SystemAudit.md` finding:
 
 Do not “fix” a failing test in `failures/` by weakening its assertion. It is
 supposed to fail until the underlying bug is fixed. If the bug is fixed, flip
-the reproducer to a passing regression and update `SystemAudit.md`.
+the reproducer to a passing regression and update `notes/SystemAudit.md`.
 
 ## 9. Definition of done
 
@@ -311,7 +311,7 @@ A change is ready only when:
 - [ ] No new safe-API unsoundness, `unsafe` block without a proof, or debug-only
       precondition is introduced.
 - [ ] Public API/docs/semver impact is noted.
-- [ ] `SystemAudit.md` and/or `failures/README.md` are updated if the audit
+- [ ] `notes/SystemAudit.md` and/or `failures/README.md` are updated if the audit
       status changes.
 
 ## 10. Useful commands

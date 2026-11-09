@@ -1,6 +1,6 @@
 # Reproducible failure corpus
 
-This directory contains the reproducers that drove `SystemAudit.md`. Every
+This directory contains the reproducers that drove [SystemAudit.md](../notes/SystemAudit.md). Every
 crate is standalone and path-depends on the repository root with
 `path = "../.."` or `path = "../../.."`. Build artifacts are intentionally not
 checked in.
