@@ -946,7 +946,7 @@ not for a child internode. `try_cascade_internodes` can leave an empty internode
 marked `DELETED` with `child[0] = null` linked in its grandparent on
 `RetryExhausted` (see GC-03). Every descent into it hits the null child and
 `continue 'retry` on the unchanged root. Before reclamation this is a permanent
-livelock for that key range; after EBR reclaims the node it is a UAF.
+livelock for that key range; after reclamation frees the node it is a UAF.
 
 **Impact:** A rare cascade failure can make a whole subtree unreachable and spin
 a core forever. The same path is the consumer half of GC-03's UAF/double free at
@@ -1416,9 +1416,9 @@ while the first is still pending. There is no generation or identity check.
 3. `remove(K)` empties `L` again; `E2` queued. `pending_coalesce() == 2`.
 4. `process_coalesce` pops E1: locks L, size 0, `prev != null`, removes it from
    the parent, `mark_deleted`, `unlink_from_chain` (marks L.next), retires L.
-5. It pops E2 in the same guard: L is still alive under EBR, lock succeeds,
-   `size()==0`, `deleted_layer()` is false (chain deletion uses the version
-   DELETED bit, not modstate), `prev` is still non-null. `finish_chain_coalesce`
+5. It pops E2 in the same guard: L is still alive under guard protection, lock
+   succeeds, `size()==0`, `deleted_layer()` is false (chain deletion uses the
+   version DELETED bit, not modstate), `prev` is still non-null. `finish_chain_coalesce`
    calls `unlink_from_chain` again. `lock_next` sees L.next still marked and
    `wait_for_split` returns immediately because `version.is_deleted()`; the CAS
    can never succeed, so the loop spins forever.
@@ -1440,9 +1440,9 @@ Observed: `pending_coalesce()==2`, then
 leaf version word `0xa0009405` = `ISLEAF | DELETED | SPLITTING | LOCKED`.
 
 **Impact:** Permanent maintenance hang (application DoS), and latent
-UAF/type-confused coalesce when a stale entry crosses a guard/epoch or the pool
-reuses the block. The same duplication can occur between a deferred entry and a
-newer immediate entry because the queued bit is shared.
+UAF/type-confused coalesce when a stale entry crosses a guard boundary or the
+pool reuses the block. The same duplication can occur between a deferred entry
+and a newer immediate entry because the queued bit is shared.
 
 **Fix:** Do not store raw node pointers in a durable queue. Use the existing
 `ikey_bound`-only deferred shape for all chain cleanup; re-traverse from the
@@ -1455,7 +1455,7 @@ leaf.
 
 **Test gap:** Existing tests cover stale/mismatched deferred entries only. Add
 the deterministic two-entry test, the `process_coalesce_batch(1)` +
-epoch-advance test, and a pooled-reuse UAF test under Miri.
+guard-refresh test, and a pooled-reuse UAF test under Miri.
 
 ---
 
@@ -3575,7 +3575,7 @@ regressions before or with the fixes:
 |---|---|
 | OCC | version changes after new-key insert; snapshot + `mark_insert` + cleared value must be `has_changed`; layer creation vs `get`/`get_ref`/scan; aarch64 litmus (or documented x86-only gate) |
 | Remove | deterministic staged same-ikey wrong-key removal; public 8-thread same-ikey churn; lost remove during a 15-key split; retry-limit test with a hot leaf |
-| Coalesce/GC | two immediate entries for one leaf; `process_coalesce_batch(1)` + epoch advance; counting-allocator promoted-layer drain; cascade with `MAX_PARENT_RETRIES` forced; `with_batch_size(1)` teardown |
+| Coalesce/GC | two immediate entries for one leaf; `process_coalesce_batch(1)` + guard refresh; counting-allocator promoted-layer drain; cascade with `MAX_PARENT_RETRIES` forced; `with_batch_size(1)` teardown |
 | Insert/split | prepend split between equal ikeys; both equal-run split panics; randomized short/NUL oracle; insert/coalesce rightmost livelock with watchdog |
 | Range | the four NUL keys; `abcdefgh`/suffix bounds; 40-key promoted layer starts 0/15/39; reverse layer-chunk end; empty rightmost `last`/rev; DoubleEnded drain-then-other; values-only empty/far/max-prefix; remove+reinsert scan ordering |
 | Suffix | occupied-slot drain shadow; empty-suffix compaction; >u16 release behavior; real-bag Miri/TSan; allocation-count regression for updates/churn |

@@ -1,6 +1,6 @@
 [package]
 name = "masstree"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 authors = ["consistent-milk12"]
 description = "A high-performance concurrent ordered map (trie of B+trees)"

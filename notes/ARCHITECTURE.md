@@ -65,7 +65,7 @@ The crate exposes three type aliases over one generic implementation:
 `MassTreeGeneric<P, A>` is the underlying type, parameterized by a
 **leaf policy** `P` (value + suffix storage) and an **allocator** `A`. The
 in-tree production allocator is `SeizeAllocator<P>`, built on the `seize`
-epoch-based reclamation (EBR) crate; `TreeAllocator` is public, so external
+Hyaline-1 reclamation implementation; `TreeAllocator` is public, so external
 allocators can be supplied through `with_allocator`.
 
 Key properties:
@@ -74,7 +74,7 @@ Key properties:
 - **Fine-grained writes**: one spin lock per node; splits use hand-over-hand
   parent locking.
 - **B-link leaves** with a split-in-progress mark bit on `next`.
-- **Epoch-based reclamation** via `seize`; nodes are recycled through
+- **Hyaline reclamation** via `seize`; nodes are recycled through
   thread-local size-class pools.
 - **Lazy coalescing**: deletion only empties a leaf and enqueues it; a later
   `maintenance` call unlinks empty leaves and collapses empty internodes. There
@@ -290,7 +290,7 @@ slot but not stored in `root_ptr`.
 ```
                          MassTreeGeneric<P, A>
         ┌───────────────────────────────────────────────────────────┐
-        │ collector: seize::Collector        (EBR domain)           │
+        │ collector: seize::Collector        (Hyaline reclamation)  │
         │ allocator: A                       (node pool + teardown) │
         │ root_ptr: AtomicPtr<u8> ────────────────────────────┐     │
         │ count: ShardedCounter                              │     │
@@ -322,7 +322,7 @@ slot but not stored in `root_ptr`.
 | `remove`               | OCC descent → leaf lock → clear slot → enqueue empty leaf | `tree/remove.rs`, `tree/coalesce.rs`                                                   |
 | range scan             | OCC descent + leaf chain walk + layer stack               | `tree/range/*`                                                                         |
 | batch insert           | Sort by ikey → per-leaf runs                              | `tree/generic/batch.rs`                                                                |
-| maintenance            | flush EBR + process coalesce queue                        | `tree/generic.rs`, `tree/coalesce.rs`                                                  |
+| maintenance            | process coalesce queue + flush Hyaline batch              | `tree/generic.rs`, `tree/coalesce.rs`                                                  |
 
 ---
 
@@ -674,7 +674,7 @@ guard's lifetime.
 
 `ValuePtr<V>` is a `#[repr(transparent)] NonNull<V>` with `Copy` and an opaque,
 address-only `Debug`. It has **no safe value accessor**: a handle can outlive
-its EBR guard and the tree, so public read APIs return `ValueRef<'a, V>`
+its guard and the tree, so public read APIs return `ValueRef<'a, V>`
 instead, either `Borrowed(&'a V)` or `Owned(V)` (an atomic copy for
 write-through values). Internal code that has validated OCC and holds the guard
 uses the unsafe `ValuePtr::as_ref` contract. `LeafPolicy::output_to_value_ref`
@@ -696,7 +696,7 @@ bytes). A slot is:
 Reads use `Acquire`; writes use `Release`. `take` atomically swaps in null.
 `update_in_place` reads the old pointer relaxed, installs the new pointer with
 Release, and returns the old pointer as a `RetireHandle`. On replacement, the
-old `Box` is retired through the epoch (`guard.defer_retire`).
+old `Box` is retired through `seize` (`guard.defer_retire`).
 
 **Write-through optimization.** Write-through is restricted to a closed list of
 primitive integer/float/`bool`/`char` types (`is_atomic_word`), not a
@@ -852,8 +852,8 @@ overwrites published bytes, including bytes whose slot was cleared or
 reassigned. Readers Acquire-load metadata and `used` before creating a slice. A
 `PhantomData<Cell<()>>` keeps the raw-buffer owner `!Sync`: atomic metadata does
 not permit multiple writers. The tree serializes writers under the leaf lock and
-keeps cells alive with EBR. Drop reconstructs the original allocation exactly
-once.
+keeps cells alive with the Hyaline guard. Drop reconstructs the original
+allocation exactly once.
 
 The unused public compaction, clone, comparison, count, and in-place assignment
 APIs, and their `PermutationProvider` trait, were removed (breaking low-level
@@ -905,9 +905,9 @@ B).
 `src/policy/suffix_ops.rs` contains the shared algorithms used by both stores:
 inline lookup, external pointer publication, append-only assignment,
 drain-and-rebuild, merging the old external bag's live suffixes using the
-permutation, and EBR retirement of replaced cells. Rebuilds gather the full live
-set from both stores before allocating, preferring inline data when both stores
-contain a slot. Capacity includes at least 512 bytes or one full live set of
+permutation, and deferred retirement of replaced cells. Rebuilds gather the full
+live set from both stores before allocating, preferring inline data when both
+stores contain a slot. Capacity includes at least 512 bytes or one full live set of
 append slack. Inserts into leaves with existing external storage skip
 speculative suffix-buffer allocation; a necessary rebuild sizes its buffer on
 the cold path.
@@ -1067,12 +1067,23 @@ Reader behavior:
 This is why readers can remain lock-free while leaves are split, unlinked, and
 retired underneath them.
 
-### 7.6 Epoch-based reclamation
+### 7.6 Hyaline reclamation
 
-Every tree owns a `seize::Collector`. `tree.guard()` enters the collector and
-returns a `LocalGuard`. Guards can be reused for many operations; they must not
-outlive the tree, and a guard from one tree must not be used with another
-(`verify_guard` panics).
+Every tree owns a `seize::Collector`. `tree.guard()` calls `Collector::enter`,
+which marks the current thread active and returns a `LocalGuard`. Guards can be
+reused for many operations; they must not outlive the tree, and a guard from one
+tree must not be used with another (`verify_guard` panics).
+
+`seize` 0.5.1 implements the
+[Hyaline-1](https://arxiv.org/abs/1905.07903) reclamation scheme, not
+epoch-based reclamation. Retired objects are appended to a thread-local batch.
+When the batch reaches the configured size (256 by default), or when
+`guard.flush()` is called, the collector attempts to attach the batch to the
+reservation lists of all currently active threads and initializes the batch's
+reference count. Each active thread decrements that count when it leaves or
+refreshes its guard; the last reference frees the batch. Reclamation is
+asynchronous and balanced across threads, with no global epoch or
+progress-checking loop.
 
 Retirement paths:
 
@@ -1083,15 +1094,18 @@ Retirement paths:
 - Suffix bags/sidecars: dedicated reclaimers.
 - Coalesced leaves/sublayers: retired after unlinking.
 
-`guard.flush()` moves the local retirement batch into the collector's
-reservation lists; `guard.refresh()` advances the epoch.
-`MassTreeGeneric::maintenance` does flush + refresh + coalesce processing.
-`Drop` clears the coalesce queue, calls `collector.reclaim_all()` under
-`&mut self` (sound because no guards can remain), then calls
-`allocator.teardown_tree(root)`.
+`guard.flush()` attempts to publish the current thread's local batch to the
+collector's reservation lists. `guard.refresh()` is equivalent to leaving and
+re-entering: it traverses and decrements the current thread's reservation list,
+which may free batches, while keeping the thread active.
+`MassTreeGeneric::maintenance` processes coalescing, then calls `guard.flush()`
+and `guard.refresh()`. `Drop` clears the coalesce queue, calls
+`collector.reclaim_all()` under `&mut self` (sound because no guards can
+remain), then calls `allocator.teardown_tree(root)`.
 
 The default retirement batch size is 256 (`with_batch_size` overrides), trading
-syscall frequency against reclamation latency.
+retirement frequency against reclamation latency. Larger batches reduce
+`sys_membarrier` traffic but retain memory longer.
 
 ### 7.7 Lock ordering and backoff
 
@@ -1400,7 +1414,7 @@ parent chain remains valid for the next resolution.
 If sublayer GC retires a cached root before descent finishes, the point
 traversal returns a null retry signal. Reads reset the shifted key and reload
 the main root; write paths do so through the B-link advance result; GC defers
-its route. The EBR guard protects the retired allocation while it is inspected.
+its route. The guard protects the retired allocation while it is inspected.
 Sublayer nodes are reclaimed only as a whole after clearing the owning parent
 slot, so a former root is not individually retired while a cached slot still
 reaches it.
@@ -1445,7 +1459,7 @@ Algorithm (`src/tree/remove.rs`):
      root, clear route.
 3. `RemoveCursor::finish_remove`:
    - `mark_insert`; `take_value` (null the slot); if `NEEDS_RETIREMENT`, retire
-     the old box through EBR.
+     the old box through `guard.defer_retire`.
    - `set_keylenx(slot, 0)`; if the old keylenx was `KSUF`, `clear_ksuf`.
    - `perm.remove(ki)`; publish with a Release `set_permutation` (readers read
      it without the lock).
@@ -1517,8 +1531,9 @@ issues. Requeue exhaustion leaves the queued bit set; it is cleared when the
 leaf is reused (`clear_empty_state`) or when the tree is dropped.
 
 `maintenance(&mut guard)` runs `process_all` and then `guard.flush()` +
-`guard.refresh()`, so nodes retired by coalescing are reclaimed in the same
-call. The tree also exposes `process_coalesce`, `process_coalesce_batch`,
+`guard.refresh()`, so retirements from coalescing are submitted in the same
+call; another active guard can still delay actual freeing. The tree also exposes
+`process_coalesce`, `process_coalesce_batch`,
 `pending_coalesce`, `coalesce_deferred`, and `coalesce_abandoned` for
 diagnostics and manual maintenance.
 
@@ -1846,7 +1861,7 @@ guard is held.
 
 ```rust
 let tree: MassTree<u64> = MassTree::new();
-let guard = tree.guard();          // enters the EBR epoch
+let guard = tree.guard();          // enters a protected region
 
 tree.insert_with_guard(b"k", 1, &guard);
 let v = tree.get_with_guard(b"k", &guard);       // Option<ValueRef<'_, u64>>
@@ -1939,7 +1954,7 @@ construction, debug assertions, and tests.
     `link_sibling` marks the old `next` for the whole move-and-link window.
 12. **Suffix publication.** Suffix bytes are written before `KSUF_KEYLENX` is
     published; external bags are append-only and never reallocate once
-    published; old cells are retired via EBR.
+    published; old cells are deferred-retired.
 13. **Value publication.** A value is written before `keylenx`/permutation
     publication; removal clears value/suffix before publishing the new
     permutation with Release.
@@ -2109,7 +2124,7 @@ read scalability.
   child's header and first child.
 - Leaf search prefetches value slots; multi-layer reads prefetch suffix storage.
   Both suffix stores share inline metadata/data hints and chase external bags to
-  their actual byte buffers. Header dereferences use EBR protected-load
+  their actual byte buffers. Header dereferences use seize protected-load
   ordering; `no-prefetch` removes the pointer chasing as well as the hardware
   hints and layer roots.
 - Range scans prefetch next/next-next (forward) and prev/prev-prev (reverse)
@@ -2121,7 +2136,7 @@ read scalability.
 - Inline values (`MassTree`/`MassTree15Inline`) require no allocation or
   retirement; reads return `Copy` values.
 - Boxed write-through values (small trivially droppable types) update the
-  existing `Box` atomically, avoiding allocation and EBR retirement on updates.
+  existing `Box` atomically, avoiding allocation and retirement on updates.
 - Batch insert sorts by ikey and inserts runs per leaf under one lock, deferring
   allocation for write-through values.
 - Range scans use a fixed 256-byte `CursorKey`, an `ArrayVec` layer stack, and a
@@ -2286,7 +2301,7 @@ code:
   low-concurrency workloads, or after large delete batches. Otherwise empty
   leaves/sublayers accumulate until the tree is dropped.
 - Reuse a guard for bulk operations (loops, batches); creating a guard per
-  operation is correct but adds EBR overhead.
+  operation is correct but adds guard/reclamation overhead.
 - Use `MassTree15<V>` for owned/large values and
   `MassTree`/`MassTree15Inline<V>` for `Copy` values ≤ 8 bytes.
 - Use `scan_intra_leaf_batch` (or `scan_batch_ref` for `BoxPolicy`) for
@@ -2309,8 +2324,8 @@ code:
 | **OCC**              | Optimistic concurrency control: snapshot version, read, validate                  |
 | **B-link**           | Leaf chain with `next` pointers; splits install a new sibling and move keys right |
 | **split mark**       | LSB of a leaf `next` pointer indicating split/unlink in progress                  |
-| **EBR**              | Epoch-based reclamation (`seize`): deferred freeing after readers leave           |
-| **guard**            | `seize::LocalGuard` pinning the current epoch; required for tree operations       |
+| **Hyaline**          | Reference-counted batch reclamation used by `seize` (Hyaline-1)                   |
+| **guard**            | `seize::LocalGuard` marking the current thread active                             |
 | **coalesce**         | Deferred unlinking of empty leaves and GC of empty sublayers                      |
 | **route**            | `ArrayVec<u64,31>` during removal; `Box<[u64]>` only when queued for GC                   |
 | **write-through**    | Updating a small boxed value in place atomically, avoiding allocation             |
@@ -2392,9 +2407,8 @@ code:
 - Masstree paper: _Cache Craftiness for Fast Multicore Key-Value Storage_,
   EuroSys 2012 — <https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf>
 - C++ reference implementation: <https://github.com/kohler/masstree-beta>
-- `seize` epoch-based reclamation: <https://crates.io/crates/seize>
-- Repository README, benchmark tables, and raw runs in `runs/`, `cpp_benches/`,
-  `rust_benches/`.
+- `seize` Hyaline-1 reclamation: <https://crates.io/crates/seize>
+- Repository README and raw runs in `runs/`, `cpp_benches/`, `rust_benches/`.
 
 ---
 

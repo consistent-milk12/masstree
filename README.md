@@ -1,162 +1,56 @@
 # masstree
 
-Disclaimer: Heavy use of AI to debug and diagnose issues from this commit onwards.
+[![Crates.io](https://img.shields.io/crates/v/masstree.svg)](https://crates.io/crates/masstree)
+[![Docs.rs](https://docs.rs/masstree/badge.svg)](https://docs.rs/masstree)
+[![CI](https://github.com/consistent-milk12/masstree/actions/workflows/ci.yml/badge.svg)](https://github.com/consistent-milk12/masstree/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/consistent-milk12/masstree/blob/main/LICENSE)
 
-A high-performance concurrent ordered map for Rust. It stores keys as `&[u8]` and supports variable-length keys by building a trie of B+trees, based on the [Masstree paper](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
+A concurrent ordered map for Rust. `masstree` stores byte-slice keys of up to
+256 bytes in a trie of B+trees, combining ordered iteration with optimistic
+point reads. It is designed for variable-length keys and shared-prefix keys;
+key lookup uses byte ordering without hashing the keys.
 
-**Disclaimer:** This is an independent implementation. It is not endorsed by, affiliated with, or connected to the original Masstree authors or their institutions.
+This is an independent Rust implementation of the
+[Masstree design](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf). It
+is not affiliated with or endorsed by the original Masstree authors.
 
-## Status
+[API documentation](https://docs.rs/masstree) ·
+[Examples](https://github.com/consistent-milk12/masstree/tree/main/examples)
 
-Current Version: v1.0.0
+## Features
 
-Significantly reduced duplicate code through trait based abstractions, while improving performance further. All standard data structure features are implemented and streamlined, on top the specialized features like range scans and prefix queries. From latency analysis, it seems to have a surprisingly strong tail latency profile for a concurrent ordered map. The cache-line aligned layout design and aggressive prefetching seems to have paid off, on top of masstree's original excellent architecture.
+- **Byte keys, 0–256 bytes** — keys are `&[u8]`; ordering is lexicographic.
+- **Concurrent reads and writes** — optimistic point reads with version
+  validation, per-node writer locks, and B-link leaf sibling chains for
+  traversal.
+- **Hyaline memory reclamation** — guard-protected access and reference-counted
+  retirement batches through `seize`.
+- **Ordered scans** — forward and reverse ranges, prefix scans, iterators, and
+  visitor-style scans with early termination.
+- **Inline or boxed values** — store `InlineBits` encodings directly in the
+  leaf, or arbitrary `Send + Sync + 'static` values in a `Box`.
+- **Batch inserts** — sort a group of entries once and insert them with a shared
+  guard.
+- **Entry API** — `or_insert`, `and_modify`, and `try_remove`.
+- **Application-selected allocator** — the library does not install a global
+  allocator. The benchmark helpers opt into mimalloc's v2 backend when the
+  `mimalloc` feature is enabled.
 
-The next issues to work on are the memory profile (some progress) and memcomparable mappings for general key types, before 1.0.
-
-NOTE: All benchmarks were run with `mimalloc` feature.
-
-## vs Rust Concurrent Maps (12T SMT)
-
-> Source: `runs/run208_read_write.txt` (masstree), `runs/run184_read_write_reworked.txt` (competitors)
-> **Config:** 12 threads on 6 physical cores (SMT/hyperthreading), 200 samples.
-
-| Benchmark           | masstree15 | tree_index | skipmap | indexset | MT vs Best |
-| ------------------- | ---------- | ---------- | ------- | -------- | ---------- |
-| 01_uniform          | 53.16      | 14.49      | 10.80   | 14.94    | 3.56x      |
-| 02_zipfian          | 45.54      | 18.86      | 12.92   | 3.28     | 2.42x      |
-| 03_shared_prefix    | 31.84      | 14.61      | 11.08   | 14.36    | 2.18x      |
-| 04_high_contention  | 79.81      | 21.64      | 16.90   | 1.97     | 3.69x      |
-| 05_large_dataset    | 18.72      | 11.35      | 7.50    | 9.17     | 1.65x      |
-| 06_single_hot_key   | 15.58      | 6.82       | 7.46    | 2.52     | 2.09x      |
-| 07_mixed_50_50      | 40.41      | 8.73       | 6.46    | 14.86    | 2.72x      |
-| 08_8byte_keys       | 62.47      | 24.97      | 14.06   | 19.69    | 2.50x      |
-| 09_pure_read        | 56.77      | 24.12      | 14.40   | 17.40    | 2.35x      |
-| 10_remove_heavy     | 26.69      | 11.18      | 7.18    | 4.26     | 2.39x      |
-| 13_insert_only_fair | 44.79      | 24.29      | 15.13   | 6.30     | 1.84x      |
-| 14_pure_insert      | 15.28      | 11.96      | 9.86    | 2.30     | 1.28x      |
-
-## High-Impact Workloads (12T SMT)
-
-> Source: `runs/run206_high_impact.txt` (masstree), `runs/run188_high_impact.txt` (competitors)
-> **Config:** 12 threads on 6 physical cores (SMT), 200 samples
-
-Benchmarks targeting Masstree's architectural advantages: long keys, variable-length keys,
-hot key patterns, mixed operations, prefix queries, deep trie traversal, and mixed prefix workloads.
-
-| Benchmark                   | masstree15 | indexset | tree_index | skipmap | MT vs Best |
-| --------------------------- | ---------- | -------- | ---------- | ------- | ---------- |
-| 01_long_keys_128b           | 44.53      | 14.58    | 13.19      | 11.11   | 3.05x      |
-| 02_multiple_hot_keys        | 43.47      | 14.02    | 13.58      | 13.44   | 3.10x      |
-| 03_mixed_get_insert_remove  | 30.61      | 5.96     | 10.24      | 8.767   | 2.99x      |
-| 04_variable_long_keys       | 36.33      | 9.43     | 8.644      | 7.842   | 3.85x      |
-| 05_prefix_queries (Kitem/s) | 1115       | n/a      | 508.4      | 145.2   | 2.19x      |
-| 06_deep_trie_traversal      | 31.49      | 13.43    | 8.122      | 9.554   | 2.34x      |
-| 07_deep_trie_read_only      | 41.23      | 14.99    | 14.77      | 13.77   | 2.75x      |
-| 08_variable_keys_arc        | 36.31      | 11.79    | 10.60      | 9.047   | 3.08x      |
-| 09_prefix_realistic_mixed   | 6.133      | n/a      | 3.029      | 1.051   | 2.02x      |
-
-## Range Scans (6T Physical)
-
-> Source: `runs/run191_range_scan.txt`
-> **Config:** Physical cores only, 200 samples, performance governor
-
-| Benchmark               | masstree15_inline | tree_index | MT vs TI |
-| ----------------------- | ----------------- | ---------- | -------- |
-| 01_sequential_full_scan | 26.73             | 13.07      | 2.04x    |
-| 02_reverse_scan         | 27.87             | 13.27      | 2.10x    |
-| 03_clustered_scan       | 25.16             | 13.08      | 1.92x    |
-| 04_sparse_scan          | 22.28             | 12.78      | 1.74x    |
-| 05_shared_prefix_scan   | 22.93             | 15.33      | 1.50x    |
-| 06_suffix_differ_scan   | 21.28             | 14.55      | 1.46x    |
-| 07_hierarchical_scan    | 24.47             | 14.60      | 1.68x    |
-| 08_adversarial_splits   | 26.83             | 8.807      | 3.05x    |
-| 09_interleaved_scan     | 22.41             | 12.86      | 1.74x    |
-| 10_blink_stress_scan    | 24.48             | 12.81      | 1.91x    |
-| 11_random_keys_scan     | 26.02             | 12.36      | 2.10x    |
-| 12_long_keys_64b_scan   | 26.06             | 14.24      | 1.83x    |
-| 15_full_scan_aggregate  | 183.1             | 84.59      | 2.16x    |
-| 16_insert_heavy         | 23.18             | 17.38      | 1.33x    |
-| 17_hot_spot             | 11.24             | 5.318      | 2.11x    |
-
-## Range Scans (12T SMT)
-
-> Source: `runs/run191_range_scan.txt`
-> **Config:** 12 threads on 6 physical cores (SMT), 200 samples
-
-| Benchmark               | masstree15_inline | tree_index | MT vs TI |
-| ----------------------- | ----------------- | ---------- | -------- |
-| 01_sequential_full_scan | 31.77             | 14.49      | 2.19x    |
-| 02_reverse_scan         | 29.96             | 14.66      | 2.04x    |
-| 03_clustered_scan       | 31.85             | 14.54      | 2.19x    |
-| 04_sparse_scan          | 30.95             | 14.58      | 2.12x    |
-| 05_shared_prefix_scan   | 24.88             | 18.62      | 1.34x    |
-| 06_suffix_differ_scan   | 23.41             | 18.16      | 1.29x    |
-| 07_hierarchical_scan    | 26.99             | 18.46      | 1.46x    |
-| 08_adversarial_splits   | 29.10             | 11.32      | 2.57x    |
-| 09_interleaved_scan     | 24.82             | 15.34      | 1.62x    |
-| 10_blink_stress_scan    | 30.05             | 15.12      | 1.99x    |
-| 11_random_keys_scan     | 25.62             | 14.70      | 1.74x    |
-| 12_long_keys_64b_scan   | 28.29             | 17.77      | 1.59x    |
-| 15_full_scan_aggregate  | 230.8             | 111.9      | 2.06x    |
-| 16_insert_heavy         | 25.09             | 21.88      | 1.15x    |
-| 17_hot_spot             | 10.61             | 6.458      | 1.64x    |
-
-## Tail Latency (pbench, Per-Operation)
-
-> Source: `runs/run213_tail_latency.txt` (8T), `runs/run207_tail_latency.txt` (1T)
-> **Config:** 200k samples per benchmark, `sample_size=1` (unbatched), TSC timer (10 ns precision)
-
-### Point Lookups
-
-| Benchmark       | masstree | treeindex | skipmap | indexset |
-| --------------- | -------- | --------- | ------- | -------- |
-| get 1T p50      | 140 ns   | 250 ns    | 350 ns  | 270 ns   |
-| get 1T p99.9    | 501 ns   | 411 ns    | 801 ns  | 621 ns   |
-| get 8T p50      | 340 ns   | 551 ns    | 621 ns  | 591 ns   |
-| get 8T p99.9    | 922 ns   | 1.15 us   | 1.36 us | 1.34 us  |
-| get 1M 1T p50   | 321 ns   | 461 ns    | 691 ns  | 521 ns   |
-| get deep 8T p50 | 661 ns   | 741 ns    | 831 ns  | -        |
-| get long 8T p50 | 611 ns   | 581 ns    | 701 ns  | -        |
-
-### Inserts
-
-| Benchmark       | masstree | treeindex | skipmap | indexset |
-| --------------- | -------- | --------- | ------- | -------- |
-| insert 1T p50   | 110 ns   | 220 ns    | 190 ns  | 571 ns   |
-| insert 1T p99.9 | 601 ns   | 1.21 us   | 661 ns  | 2.93 us  |
-| insert 8T p50   | 691 ns   | 812 ns    | 1.09 us | 5.93 us  |
-| insert 8T p99.9 | 80.3 us  | 21.1 us   | 5.70 us | 45.8 us  |
-
-### Mixed Read/Write (8T)
-
-| Benchmark   | masstree | treeindex | skipmap | indexset |
-| ----------- | -------- | --------- | ------- | -------- |
-| 90/10 p50   | 381 ns   | 601 ns    | 681 ns  | 621 ns   |
-| 90/10 p99.9 | 1.04 us  | 4.18 us   | 5.95 us | 1.39 us  |
-| 50/50 p50   | 421 ns   | 1.01 us   | 1.09 us | 691 ns   |
-| 50/50 p99.9 | 1.04 us  | 6.66 us   | 10.3 us | 1.57 us  |
-
-### Range Scans (8T, 50-key scan)
-
-| Benchmark        | masstree | treeindex | skipmap |
-| ---------------- | -------- | --------- | ------- |
-| scan p50         | 972 ns   | 862 ns    | 3.90 us |
-| scan+write p50   | 902 ns   | 1.02 us   | 3.97 us |
-| scan+write p99.9 | 2.50 us  | 6.66 us   | 9.99 us |
-
-## Install
+## Installation
 
 ```toml
 [dependencies]
-masstree = { version = "1.0.0", features = ["mimalloc"] }
+masstree = "1.0"
 ```
 
-MSRV is Rust 1.92+ (Edition 2024).
+Use a current stable Rust toolchain. The crate uses Rust 2024; see
+[Toolchains and platforms](#toolchains-and-platforms) for the tested setup.
 
-The `mimalloc` feature sets the global allocator. If your project already uses a custom allocator, omit this feature.
+## Quick start
 
-## Quick Start
+Values stored inline must implement `InlineBits`, which encodes a
+`Copy + Send + Sync + 'static` value as a `u64`. Built-in implementations include
+`u64`, `i32`, `f64`, `bool`, and `()`. Use the default `MassTree` alias for them:
 
 ```rust
 use masstree::{MassTree, RangeBound};
@@ -164,84 +58,360 @@ use masstree::{MassTree, RangeBound};
 let tree: MassTree<u64> = MassTree::new();
 let guard = tree.guard();
 
-// Insert (returns None for new keys, Some(ValueRef) for the old value)
-tree.insert_with_guard(b"hello", 123, &guard);
-tree.insert_with_guard(b"world", 456, &guard);
+assert!(tree.insert_with_guard(b"alice", 1, &guard).is_none());
+assert!(tree.insert_with_guard(b"bob", 2, &guard).is_none());
 
-// Point lookup (returns copy for inline storage)
-assert_eq!(tree.get_with_guard(b"hello", &guard).map(|v| *v), Some(123));
+assert_eq!(tree.get_with_guard(b"alice", &guard).map(|v| *v), Some(1));
+assert_eq!(tree.len(), 2);
 
-// Remove
-tree.remove_with_guard(b"hello", &guard).unwrap();
-assert!(tree.get_with_guard(b"hello", &guard).is_none());
-
-// Range scan
+// A visitor returns false to stop the scan early.
+let mut total = 0;
 tree.scan(
     RangeBound::Included(b"a"),
     RangeBound::Excluded(b"z"),
-    |key, value| {
-        println!("{:?} -> {}", key, value);
-        true // continue scanning
+    |_key, value| {
+        total += value;
+        true
     },
     &guard,
 );
+assert_eq!(total, 3);
 
-// Prefix scan
-tree.scan_prefix(b"wor", |key, value| {
-    println!("{:?} -> {}", key, value);
-    true
-}, &guard);
+assert_eq!(
+    tree.remove_with_guard(b"alice", &guard).unwrap().map(|v| *v),
+    Some(1),
+);
 ```
 
-## Ergonomic APIs
+For heap-backed values, use `MassTree15`. Its `get_ref` returns a `ValueRef`:
+values such as `String` are borrowed under the guard, while primitive types
+that support in-place atomic updates return an owned copy.
 
-For simpler use cases, auto-guard versions create guards internally:
+```rust
+use masstree::MassTree15;
+
+let sessions: MassTree15<String> = MassTree15::new();
+let guard = sessions.guard();
+
+assert!(
+    sessions
+        .insert_with_guard(b"session:42", "active".to_owned(), &guard)
+        .is_none()
+);
+
+// Owned, auto-guard lookup.
+assert_eq!(sessions.get(b"session:42").as_deref(), Some("active"));
+
+// Zero-copy lookup tied to the guard lifetime.
+if let Some(value) = sessions.get_ref(b"session:42", &guard) {
+    assert_eq!(value.as_str(), "active");
+}
+```
+
+### Type aliases
+
+| Type                  | Value storage          | Typical values                    |
+| --------------------- | ---------------------- | --------------------------------- |
+| `MassTree<V>`         | Inline 64-bit encoding | `u64`, `i32`, `f64`, `bool`, `()` |
+| `MassTree15Inline<V>` | Inline 64-bit encoding | Explicit name for `MassTree<V>`   |
+| `MassTree15<V>`       | Heap-allocated `Box<V>` | `String`, `Vec<u8>`, structs, enums |
+
+`MassTreeGeneric<P, A>` is the underlying implementation, parameterized by a
+leaf policy and an allocator. Application code normally uses one of the aliases
+above.
+
+## Iteration and prefix scans
+
+```rust
+use masstree::{MassTree, RangeBound};
+
+let tree: MassTree<u64> = MassTree::new();
+let guard = tree.guard();
+
+for (key, value) in [(b"user:1", 1u64), (b"user:2", 2), (b"post:1", 3)] {
+    let _ = tree.insert_with_guard(key, value, &guard);
+}
+
+// Ordered iteration over the whole tree.
+for entry in tree.iter(&guard) {
+    println!("{} -> {}", String::from_utf8_lossy(entry.key()), entry.value());
+}
+
+// Prefix scan.
+let mut users = 0;
+tree.scan_prefix(
+    b"user:",
+    |_key, _value| {
+        users += 1;
+        true
+    },
+    &guard,
+);
+assert_eq!(users, 2);
+
+// Range iterator. Bounds can be Included, Excluded, or Unbounded.
+for entry in tree.range(
+    RangeBound::Included(b"user:"),
+    RangeBound::Unbounded,
+    &guard,
+) {
+    println!("{}", String::from_utf8_lossy(entry.key()));
+}
+```
+
+`scan_prefix` and `scan` deliver values through the callback without allocating
+a key buffer per entry. The iterator API returns owned keys as `Vec<u8>`.
+
+For boxed values, use `scan_ref` or `scan_batch_ref` to receive `&V` references
+valid for the callback duration. These borrow values such as `String` directly;
+for primitive types updated atomically in place, they reference an atomic copy.
+The policy-output scan and iterator APIs yield opaque `ValuePtr<V>` handles for
+`MassTree15`, with no safe value accessor. Read boxed values through `get`,
+`get_ref`, or the reference-based scan methods.
+
+Scans and iterators preserve key order but do not provide a snapshot of the
+whole tree. Their results can reflect concurrent changes made during traversal.
+
+## Entry API and batch inserts
 
 ```rust
 use masstree::MassTree;
 
 let tree: MassTree<u64> = MassTree::new();
+let guard = tree.guard();
 
-// Auto-guard versions (simpler but slightly more overhead per call)
-tree.insert(b"key1", 100);
-tree.insert(b"key2", 200);
+let visits = tree
+    .entry_with_guard(b"visits", &guard)
+    .and_modify(|value| *value + 1)
+    .or_insert(1);
+assert_eq!(*visits, 1);
 
-assert_eq!(tree.get(b"key1"), Some(100));
-assert_eq!(tree.len(), 2);
-assert!(!tree.is_empty());
-
-tree.remove(b"key1").unwrap();
+let result = tree.insert_batch(vec![
+    (b"alpha".to_vec(), 10u64),
+    (b"beta".to_vec(), 20u64),
+]);
+assert_eq!(result.inserted, 2);
+assert_eq!(result.updated, 0);
+assert_eq!(result.total(), 2);
 ```
 
-### Range Iteration
+The entry API does not hold a lock between classification and mutation. Under
+concurrent writers, an `and_modify` computation may use a stale snapshot, and
+`VacantEntry::insert` can overwrite a concurrently inserted value. Use an
+external lock shared by all competing writers when the read-modify-write must
+be atomic.
+
+Batch inserts preserve input order for duplicate keys, so the last input value
+for a key wins in the absence of competing writes. A batch is not a transaction:
+other threads can observe partial progress, and a panic during insertion can
+leave earlier entries applied.
+
+## Concurrency model
+
+Point lookups, inserts, removals, and scans use a `seize::LocalGuard` to protect
+nodes and values from reclamation. The guard marks the current thread active
+in the tree's collector. Convenience methods such as `get`, `insert`, and
+`remove` create their own guard; explicit-guard methods let you reuse one across
+many operations:
 
 ```rust
-use masstree::{MassTree, RangeBound};
+use masstree::MassTree;
 
 let tree: MassTree<u64> = MassTree::new();
 let guard = tree.guard();
 
-// Populate
-for i in 0..100u64 {
-    tree.insert_with_guard(&i.to_be_bytes(), i, &guard);
-}
-
-// Iterator-based range scan
-for entry in tree.range(RangeBound::Included(b""), RangeBound::Unbounded, &guard) {
-    println!("{:?} -> {:?}", entry.key(), entry.value());
-}
-
-// Full iteration
-for entry in tree.iter(&guard) {
-    println!("{:?}", entry.key());
+for (i, key) in [b"a", b"b", b"c"].into_iter().enumerate() {
+    let _ = tree.insert_with_guard(key, i as u64, &guard);
 }
 ```
 
+Guard-scoped methods such as `get_with_guard` and `remove_with_guard` return a
+`ValueRef` whose lifetime is tied to the guard. Inline values and boxed primitive
+types that support atomic updates return owned copies; other boxed values return
+protected borrows. The convenience methods `get`, `insert`, and `remove`
+require `V: Clone` and return owned values, cloning borrowed values when needed.
+
+`MassTree<V>` is `Send + Sync` for `V: InlineBits`; `MassTree15<V>` is
+`Send + Sync` for `V: Send + Sync + 'static`. A tree can be shared through `Arc`;
+each thread creates its own guard. Use a guard only with the tree that created
+it; passing another tree's guard panics.
+
+Point reads validate optimistic node snapshots and retry on conflicts. They
+can spin or yield while a writer has marked a node dirty, and a lookup through
+a promoted layer can briefly try-lock the parent leaf to refresh its root
+pointer. Point reads therefore have no lock-free progress guarantee.
+
+### Reclamation model
+
+`masstree` uses [`seize`](https://crates.io/crates/seize), which implements the
+[Hyaline reclamation scheme](https://arxiv.org/abs/1905.07903) (specifically the
+Hyaline-1 variant). Retired nodes, boxed values, and replaced suffix storage are
+appended to a thread-local batch. When the batch reaches its threshold, or when
+`tree.flush(&guard)` is called, the collector attempts to publish the batch to
+active threads' reservation lists. Publication requires at least as many retired
+objects as active threads; smaller batches can remain pending even after a
+flush. Participating threads release their batch references when they leave or
+refresh their protected region, and reclamation runs once all references have
+been released. This distributes reclamation work without a global epoch or
+periodic progress checks. Each tree owns its collector; dropping the tree drains
+pending retirements and destroys the remaining tree.
+
+`LocalGuard` is neither `Send` nor `Sync`. Reusing it avoids repeated guard
+entry and exit, but holding it for a long time can delay reclamation. The
+default retirement threshold is 256 objects; the `with_batch_size` constructors
+can tune it. `maintenance` attempts queued leaf/sublayer cleanup, then flushes
+the current thread's batch and refreshes the guard. Refreshing can invalidate
+older guard-scoped references, which is why `maintenance` takes `&mut` access
+to the guard. Refresh has no effect while another guard from the same tree is
+alive on the same thread; other threads' guards can also delay reclamation.
+
+The default allocator recycles reclaimed node blocks through thread-local
+pools, so reclamation does not necessarily return their memory to the system.
+
+`len()` is a sharded count. Under concurrent mutation it is approximate,
+not a linearizable snapshot.
+
+Deletion is lazy: removing the last entry from a leaf queues the empty leaf for
+coalescing. In long-running, delete-heavy workloads, call `maintenance`
+periodically between batches of operations, without another guard for this
+tree on the calling thread:
+
+```rust
+use masstree::MassTree;
+
+let tree: MassTree<u64> = MassTree::new();
+let mut guard = tree.guard();
+// ... operations ...
+tree.maintenance(&mut guard);
+```
+
+## Feature flags
+
+| Feature                 | Default | Description                                                                                  |
+| ----------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `debug-print`           | yes     | Enables `print_tree` and `print_tree_to` for inspecting the tree structure.                   |
+| `tracing`               | no      | Structured tracing events and the `init_tracing` helper.                                      |
+| `no-prefetch`           | no      | Disables the library's explicit software prefetch hints.                                     |
+| `small-suffix-capacity` | no      | Halves inline suffix data capacity (512 to 256 bytes); shrinks embedded leaves or heap sidecars. |
+| `sidecar-suffix`        | no      | Stores inline-policy suffixes in a lazily allocated heap sidecar instead of the embedded bag.  |
+| `debug-routing`         | no      | Prints routing and split diagnostics to stderr. Intended for debugging only.                   |
+| `mimalloc`              | no      | Optional mimalloc v2 backend; benchmark helpers install it as their global allocator.          |
+
+To omit the default debug-printing support, use this dependency declaration:
+
+```toml
+[dependencies]
+masstree = { version = "1.0", default-features = false }
+```
+
+## Design
+
+The tree routes keys by 8-byte chunks. The top-level B+tree indexes the
+first chunk. When two keys share a chunk and both continue with different
+suffixes, the suffix slot becomes a layer pointer to a subtree for the next
+chunk. A key ending at that chunk can coexist in a separate terminal slot.
+A leaf can store the remaining bytes as a suffix, so a long key does not require
+a layer for every chunk. Trie depth is bounded at 32 layers by the 256-byte key
+limit; each visited layer may require its own B+tree search.
+
+Nodes use fixed-width layouts: 15 slots per leaf, up to 16 children per
+internode, separate 64-byte regions for the leaf version word and
+permutation, and compile-time size/offset assertions on 64-bit targets. Leaf
+splits publish a right sibling through the B-link chain before parent
+propagation completes. Readers and range scans use version checks, retries,
+and these links to find moved keys.
+
+Reads use optimistic concurrency control: load a node version, read node fields,
+then validate the relevant version bits. Writers take a per-node spin lock,
+mark structural mutations dirty, and publish them with a version increment on
+unlock. The [`seize`](https://crates.io/crates/seize) Hyaline collector defers
+reclamation; the default allocator recycles node blocks through thread-local
+pools.
+
+## Constraints
+
+- Keys must be 0–256 bytes. Point operations reject longer keys with a panic;
+  explicit batch inserts validate all input keys before applying entries.
+  `Extend` validates one chunk at a time, so earlier chunks can already be
+  applied when a later key is rejected.
+- Keys are ordered lexicographically by byte value. Fixed-width unsigned
+  integers encoded in big-endian order preserve numeric ordering. Signed
+  integers need an order-preserving transformation, such as flipping the sign
+  bit before big-endian encoding; floating-point keys need a separate encoding.
+- `MassTree<V>` accepts only types implementing `InlineBits`; use
+  `MassTree15<V>` for `String`, `Vec<u8>`, and other heap-backed values.
+- Values must be `Send + Sync + 'static`.
+- The tree does not support custom comparators.
+- `len()` is approximate during concurrent mutation.
+- Coalescing removes eligible empty leaves and empty sublayers; it does not
+  rebalance partially filled nodes. Call `maintenance` during delete-heavy
+  workloads. Batching and active guards can delay reclamation as described above.
+
+## Toolchains and platforms
+
+The crate uses Rust 2024. CI runs stable Rust on Ubuntu x86_64, plus nightly
+Rust for Miri. `clippy.toml` sets a 1.92 lint baseline, but `Cargo.toml` does not
+declare a `rust-version` and CI does not test that compiler version, so a Rust
+1.92 minimum is not verified by the current checks.
+
+The source includes size/offset assertions for 64-bit node layouts and software
+prefetch implementations for x86_64 and aarch64. Other architectures use no-op
+prefetch helpers. Build and runtime compatibility on aarch64 and other
+platforms are not checked by the current CI configuration.
+
+## Examples
+
+Run these commands from a checkout of this repository. Examples live in
+[`examples/`](https://github.com/consistent-milk12/masstree/tree/main/examples):
+
+```bash
+cargo run --example basic_usage
+cargo run --example url_cache --release
+cargo run --example session_store --release
+cargo run --example rayon_parallel --release
+cargo run --example tokio_async --release
+```
+
+## Development
+
+```bash
+cargo fmt --all -- --check
+cargo test --lib
+cargo test --tests
+cargo test --doc
+cargo check --all-targets --no-default-features
+cargo check --all-targets --all-features
+```
+
+CI also runs simplified Loom models and the Miri leak-test target. Loom does
+not model the full tree, and this Miri command covers only `tests/leak_tests.rs`.
+The latter requires a nightly toolchain with the Miri component installed:
+
+```bash
+RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
+MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" \
+    cargo +nightly miri test --test leak_tests
+```
+
+Architecture and audit notes are in
+[`notes/`](https://github.com/consistent-milk12/masstree/tree/main/notes). The
+[`failures/`](https://github.com/consistent-milk12/masstree/tree/main/failures)
+tree contains standalone audit reproducers and regression tests, including
+intentional compile-fail cases; it is not part of the normal test suite. Follow
+each reproducer's instructions for its expected result. The audit includes
+historical findings and a remediation-status section. Documentation can lag
+the implementation; check the current source and tests when resolving a
+discrepancy.
+
 ## License
 
-MIT. See `LICENSE`.
+MIT. See
+[`LICENSE`](https://github.com/consistent-milk12/masstree/blob/main/LICENSE).
 
 ## References
 
-- [Masstree Paper (EuroSys 2012)](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
-- [C++ Reference Implementation](https://github.com/kohler/masstree-beta)
+- [Cache Craftiness for Fast Multicore Key-Value Storage (EuroSys 2012)](https://pdos.csail.mit.edu/papers/masstree:eurosys12.pdf)
+- [Snapshot-Free, Transparent, and Robust Memory Reclamation for Lock-Free Data Structures (PLDI 2021)](https://arxiv.org/abs/1905.07903)
+- [`seize`](https://crates.io/crates/seize), the Hyaline reclamation
+  implementation used by this crate
+- [C++ reference implementation](https://github.com/kohler/masstree-beta)

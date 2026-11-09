@@ -3,7 +3,7 @@
 `nonempty_alloc` is a passing PERF-17 regression. A real counting allocator
 checks eight nonempty removals for boxed and inline values with 32- and
 256-byte keys: the former Vec routes allocated [8, 8, 32, 32] times, and stack
-routes allocate [0, 0, 0, 0]. EBR bookkeeping is primed before counting. It also
+routes allocate [0, 0, 0, 0]. Reclamation bookkeeping is primed before counting. It also
 compares surviving keys/values with BTreeMap and empties the remaining deep
 layers to exercise owned queued routes. Native and Miri both pass.
 

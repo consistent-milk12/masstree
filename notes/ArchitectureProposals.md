@@ -143,9 +143,9 @@ grows to 5,000 keys and verifies every value. Cold first-insert medians were
 6.87 → 5.35 µs locally (allocation count is the regression gate, not timing).
 Library, strict Clippy and focused pool Miri tests pass. Embedded and sidecar
 suffix prefetch now share a helper that fetches inline metadata/data and the
-external bag's actual byte buffer. Following pointers uses the same EBR load
-ordering as suffix reads; `no-prefetch` removes the pointer chasing as well as
-CPU hints. A concurrent replacement test and inline integration tests pass under
+external bag's actual byte buffer. Following pointers uses the same
+protected-load ordering as suffix reads; `no-prefetch` removes the pointer
+chasing as well as CPU hints. A concurrent replacement test and inline integration tests pass under
 Miri, with native coverage for both suffix features and no-prefetch.
 
 Twig construction now prepares all nodes, keys and suffixes outside the parent
@@ -198,8 +198,8 @@ instead of `(6, 6)` before the fix. Forward/reverse inline, boxed copy and boxed
 reference variants now preserve the snapshot through slot reuse and layer
 conversion, including under Miri. The promoted-layer BTreeMap probe and callback
 mutation regressions pass; a Loom key/handle model validates the ordering (not
-the whole tree/EBR implementation). Per-entry readers now use that same kernel,
-including initial positioning and layer pointers. The duplicate single-layer
+the whole tree/reclamation implementation). Per-entry readers now use that same
+kernel, including initial positioning and layer pointers. The duplicate single-layer
 readers/leaf walkers are removed. A stale-parent-version regression rejected
 initial reverse descent only after this change; a second BTreeMap regression
 previously returned zero of 40 keys when its end bound used a later prefix. Both

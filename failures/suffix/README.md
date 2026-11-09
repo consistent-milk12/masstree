@@ -8,7 +8,7 @@ suffix storage remains amortized. It also checks every surviving value and len.
 2. **PERF-02** — 15 keys with 200-byte suffixes, then 20 remove/reinsert cycles:
    baseline 42 allocations / 71,584 bytes; after sizing rebuilds from the complete
    live set and skipping throwaway preallocation, 6 allocations / 20,560 bytes.
-   The bound allows EBR bookkeeping while rejecting per-operation rebuilding.
+   The bound allows reclamation bookkeeping while rejecting per-operation rebuilding.
 3. **PERF-09** — insert into the middle of a full leaf with 248-byte suffixes:
    3 buffer reallocations before destination reservation, zero afterward. Every
    original and inserted key is checked after the split.

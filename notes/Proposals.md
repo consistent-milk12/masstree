@@ -14,10 +14,10 @@ line numbers move.
 ## 1. Recommendation and evidence
 
 Keep the current trie of B+trees, 15-slot layout, optimistic readers, sealed
-storage policies, and EBR reclamation. The next production-quality improvement
-should make their contracts easier to use and harder to violate. A replacement
-tree architecture would discard substantial completed work without evidence that
-it solves the remaining problems.
+storage policies, and Hyaline reclamation. The next production-quality
+improvement should make their contracts easier to use and harder to violate. A
+replacement tree architecture would discard substantial completed work without
+evidence that it solves the remaining problems.
 
 The most useful next changes are:
 
@@ -436,8 +436,9 @@ before expanding. A zero-cost wrapper must be demonstrated, not declared.
 
 ### 6.2 Rules the architecture must express
 
-- EBR protection proves lifetime, not node kind, current membership, full-key
-  identity, or exclusive mutation. Each additional claim needs validation.
+- Reclamation protection proves lifetime, not node kind, current membership,
+  full-key identity, or exclusive mutation. Each additional claim needs
+  validation.
 - A leaf lock does not make a published suffix buffer exclusively owned.
   `assign_init`, growth, and reallocation require unpublished/exclusive storage.
   Tighten call-site proof language around
@@ -457,7 +458,7 @@ before expanding. A zero-cost wrapper must be demonstrated, not declared.
   `SeqCst` for the reclamation protocol; replacing them with Acquire because an
   x86 benchmark passes is not a valid optimization.
 - [PropagationContext](../src/tree/split/propagation_context.rs) extends
-  lock-guard lifetimes under EBR protection. A guarded-node capability can
+  lock-guard lifetimes under guard protection. A guarded-node capability can
   concentrate that proof, but deleting the cast alone is not a substitute for
   preserving lifetime and lock ownership.
 
@@ -472,8 +473,8 @@ a documentation/proof gap identified from source, not a reproduced claim of UB.
 
 `NodeVersion` has finite version fields: bits 3–27 contribute to the mutation
 version, and `has_changed` compares snapshots after masking the effect of a
-clean lock. A reader can be delayed while many mutations occur. EBR prevents
-reclamation but does not prevent version values from recurring.
+clean lock. A reader can be delayed while many mutations occur. Guard protection
+keeps retired nodes alive but does not prevent version values from recurring.
 
 **Decision:** add a reduced-counter model that includes the actual
 slot/permutation/payload protocol and a paused reader across wraparound; audit
@@ -903,7 +904,7 @@ transactional.
 | S28 — [Chain coalescing](../src/tree/coalesce.rs), `finish_chain_coalesce` | Re-traverse bound → find/lock candidate → verify still empty/current → update parent → mark deleted/unlink → retire; otherwise drop or defer job. Leftmost/special cases constrain eligibility. | **Keep unlink-before-retire.** Never retire while parent/child links still reach the node. Test stale bounds, leftmost leaf, reused leaf, duplicate jobs, and immediate-parent contention. |
 | S29 — [Sublayer GC](../src/tree/coalesce.rs), `try_remove_sublayer` | Resolve parent route → lock parent leaf → resolve layer root → try-lock/validate whole empty sublayer → clear owning slot → mark/unlink/retire subtree; failure releases locks and defers. | **Preserve all-or-nothing structural detachment.** Include promoted internodes and siblings, and avoid blocking lock inversion. One job may inspect many nodes; test work-budget semantics and nonempty descendants. |
 | S30 — [Internode cascade](../src/tree/remove.rs), `try_cascade_internodes` | Empty child/root state → acquire and validate parent/grandparent → remove reachability → retire → continue upward or stop. Live unary nodes remain to preserve height. | **Keep non-abandonable post-detachment repair.** No naive live-child collapse. Test cascade+reinsertion, parent movement, retry exhaustion paths and teardown reachability. |
-| S31 — [EBR retirement](../src/alloc15.rs), [maintenance](../src/tree/generic.rs), [value reclamation](../src/policy.rs) | Unreachable object → defer → flush → wait for protecting guards → reclaim callback. `refresh` changes participation; another guard can still delay reclamation. | **Document stages and measure them separately.** Guarded values remain valid until their borrow ends. Test delayed reclaim with a held guard, then quiescence and drop/allocation deltas. |
+| S31 — [Hyaline retirement](../src/alloc15.rs), [maintenance](../src/tree/generic.rs), [value reclamation](../src/policy.rs) | Unreachable object → defer → flush → wait for protecting guards → reclaim callback. `refresh` changes participation; another guard can still delay reclamation. | **Document stages and measure them separately.** Guarded values remain valid until their borrow ends. Test delayed reclaim with a held guard, then quiescence and drop/allocation deltas. |
 | S32 — [Node pool refill/retention](../src/node_pool.rs) | Empty size-class freelist → batch refill (16, growing to 128) → allocation/pop → reclaimed push → overflow free. Per-class retention is capped. | **Keep adaptive refill; measure retained bytes.** Pool capacity and current live allocation are different quantities. Test cold start, steady reuse, overflow and thread churn with allocation deltas. |
 | S33 — [TLS destruction fallback](../src/node_pool.rs) | Pool available → TLS destruction in progress/completed → `try_with` fails → direct allocation/deallocation fallback. Reclamation can run in either state. | **Keep fallback as an invariant.** Do not simplify to `POOL.with`. Existing TLS-order reproducers are the right regression family; run in disposable processes. |
 | S34 — [Tree drop / teardown](../src/tree.rs), [allocator teardown](../src/alloc15.rs) | Exclusive tree destruction → discard deferred work records → reclaim retired objects → walk reachable tree → release values/suffixes/nodes. Teardown's traversal has its own bounded-stack/spill state. | **Keep exclusive traversal distinct from concurrent descent.** Linked and retired sets must be disjoint. Test deep/promoted trees, remove/coalesce before drop, and no double reclaim under Miri. |
@@ -920,7 +921,7 @@ flowchart LR
     E --> Q[Queued cleanup]
     Q -->|Retry or retained debt| Q
     Q -->|Detach every published link| D[Unreachable node]
-    D --> R[Retired under EBR]
+    D --> R[Retired under Hyaline]
     R -->|Protecting guards leave| P[Reclaimed or pooled storage]
 ```
 

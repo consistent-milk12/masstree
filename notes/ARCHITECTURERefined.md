@@ -134,7 +134,7 @@ The design replaces the current protocol boundaries:
 1. **Stable layer anchors.** A layer slot refers to a stable `LayerAnchor`
    containing the current root pointer. Root promotion changes that pointer,
    rather than leaving every reader and collector to rediscover the root via an
-   obsolete left leaf. Epoch protection covers anchors as well as nodes.
+   obsolete left leaf. Guard protection covers anchors as well as nodes.
 2. **Atomic metadata, immutable published bytes.** Readers snapshot atomic node
    fields. Suffix regions and boxed values are immutable after publication. A
    retry cannot retroactively make a plain data race legal.
@@ -414,8 +414,8 @@ pseudocode says `Relaxed`. The adapter may strengthen ordering.
 New allocations are fully initialized before a pointer store with Release
 publication; pointer loads that will be dereferenced acquire publication through
 the adapter or the validated node commit. Be explicit about which edge imports
-initialization. Epoch protection and visibility are distinct: neither supplies
-the other automatically.
+initialization. Reclamation protection and visibility are distinct: neither
+supplies the other automatically.
 
 Capture raw payloads without constructing `&V`, `&LayerAnchor` or suffix slices
 until tags and metadata have validated. A retry must discard captured values
@@ -770,7 +770,7 @@ independent traversal state machines.
 
 Offer two lifetime modes:
 
-- A pinned iterator returns guarded references and can hold a reclamation epoch
+- A pinned iterator returns guarded references and can hold a reclamation guard
   for its entire lifetime. Its retained-memory cost is explicit.
 - A resumable owned scan clones/copies a page of results, releases the guard,
   and resumes with an exclusive full-key bound under a new guard. It provides
@@ -870,10 +870,10 @@ and ownership corpus; it is not an allocator-only change.
 
 Retirement means an object is unreachable to new guarded traversals, while
 existing guarded traversals may still hold it. Allocation reuse occurs only
-after the grace period. Every retired type carries the correct original
-layout/deallocator and a destructor that cannot unwind through the reclaimer.
-Neither a version check nor a fresh guard makes an old unprotected address valid
-again.
+after the reclaimer proves no guarded traversal can still reach it. Every
+retired type carries the correct original layout/deallocator and a destructor
+that cannot unwind through the reclaimer. Neither a version check nor a fresh
+guard makes an old unprotected address valid again.
 
 Use `defer_retire` when the current operation can still return/use the old
 value. `seize`'s collector-level retirement API does not promise protection for
@@ -881,10 +881,10 @@ values retired by the current thread in the same way. Guard flush is not an
 immediate drain and does not override active readers or library batching.
 Distinguish removal, retirement submission and actual reclamation in metrics.
 
-Long-lived guards can retain arbitrarily much replaced data. This is an EBR
-tradeoff, not a queue leak. Expose retained bytes and oldest-guard diagnostics;
-provide owned paged scans and encourage bounded guard scopes. Do not reclaim
-early to satisfy a memory target.
+Long-lived guards can retain arbitrarily much replaced data. This is a
+reclamation tradeoff, not a queue leak. Expose retained bytes and oldest-guard
+diagnostics; provide owned paged scans and encourage bounded guard scopes. Do
+not reclaim early to satisfy a memory target.
 
 ### 11.2 Durable logical work
 
@@ -1129,7 +1129,7 @@ its unsafe boundary. Require the following evidence before enabling it.
 | Ownership and guarded outputs | Compile-fail lifetimes, runtime guard-affinity rejection, forgotten/nested guards, drop counters, Miri strict provenance, leak accounting |
 | Split/root/layer reachability | Deterministic pause hooks before/after every edge publication; readers entering at each hook |
 | Scan completeness and crossing | All adapters in both directions; mixed ends; promoted layers; concurrent structural movement of persistent sentinel keys |
-| Retirement after detachment | Model all incoming edges; pause new readers after unlink and before retire; aggressive address reuse only after grace periods |
+| Retirement after detachment | Model all incoming edges; pause new readers after unlink and before retire; aggressive address reuse only after reclamation completes |
 | Panic/failure atomicity | Inject allocation/preparation failures and user clone/callback/drop panics; verify graph ownership after each allowed recovery |
 | Bounded maintenance | Hold lock with barriers, process one bounded generation, release, then drain; check progress and exact allocation deltas |
 | Portable implementation | Native AArch64 stress plus target layout checks; x86 tests alone cannot satisfy this gate |

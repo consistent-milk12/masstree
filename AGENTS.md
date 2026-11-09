@@ -8,9 +8,10 @@ invariants change.
 
 `masstree` is a Rust implementation of the Masstree ordered-map data structure:
 a trie of B+trees with concurrent OCC readers, leaf/internode locks, B-link
-siblings, EBR reclamation, inline or boxed values, and optional suffix storage.
+siblings, Hyaline reclamation via `seize`, inline or boxed values, and optional
+suffix storage.
 
-- Crate: `masstree` 1.0.0, Rust edition 2024.
+- Crate: `masstree` 1.0.1, Rust edition 2024.
 - Public aliases: `MassTree` = `MassTree15Inline` (inline values);
   `MassTree15` = boxed small-value `BoxPolicy`/sidecar-suffix tree.
 - Default feature: `debug-print`.
@@ -20,12 +21,14 @@ siblings, EBR reclamation, inline or boxed values, and optional suffix storage.
 - Audit findings and fix order: `notes/SystemAudit.md`.
 - Reproducible failure corpus: `failures/` (intentionally failing programs).
 
-Do not assume comments or `notes/ARCHITECTURE.md` are correct. The audit found several
-architecture claims contradicted by the code. Verify against source and tests.
+Do not assume comments or `notes/ARCHITECTURE.md` are correct. The audit found
+several architecture claims contradicted by the code. Verify against source and
+tests.
 
 ## 2. First steps for any task
 
-1. Read `notes/ARCHITECTURE.md` and the relevant section of `notes/SystemAudit.md`.
+1. Read `notes/ARCHITECTURE.md` and the relevant section of
+   `notes/SystemAudit.md`.
 2. If the task is a bug fix, search `failures/` for an existing reproducer.
    Prefer extending an existing reproducer over writing a new stress test.
 3. Read the actual call paths in `src/`; do not trust names such as
@@ -66,8 +69,8 @@ cargo check --all-targets --no-default-features   # fails on examples/print_tree
 cargo clippy --all-targets --all-features -- -D warnings  # currently 4 errors
 ```
 
-These are tracked in `notes/SystemAudit.md` as `TOOL-01` and `TOOL-04`. Fixing them is
-welcome, but do not mix unrelated lint cleanup into a correctness fix.
+These are tracked in `notes/SystemAudit.md` as `TOOL-01` and `TOOL-04`. Fixing
+them is welcome, but do not mix unrelated lint cleanup into a correctness fix.
 
 Loom:
 
@@ -108,7 +111,7 @@ process.
 | `src/suffix.rs`, `src/suffix/*.rs` | inline/external suffix bags, compaction |
 | `src/nodeversion.rs` | OCC version/lock bits, split/delete/root state |
 | `src/permuter.rs` | 15-slot permutation encoding and operations |
-| `src/alloc15.rs`, `src/node_pool.rs` | allocator, EBR reclamation, TLS node pool, teardown |
+| `src/alloc15.rs`, `src/node_pool.rs` | allocator, Hyaline reclamation, TLS node pool, teardown |
 | `src/key.rs`, `src/ksearch/` | key chunks/ordering and internode routing |
 | `src/shard_counter.rs` | approximate concurrent `len()` counter |
 | `tests/` | integration, stress, proptests, leak tests, C++-shaped parity |
@@ -137,15 +140,15 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 
 ### Layer roots
 
-- Promotion initially leaves the parent slot pointing at the original left
-  leaf. Point operations may refresh it to a resolved internode root, which
-  can become stale after another promotion. Resolve parent pointers and check
-  the node kind; never assume a layer-slot target is a leaf (`RNG-04`, `GC-02`).
+- Promotion initially leaves the parent slot pointing at the original left leaf.
+  Point operations may refresh it to a resolved internode root, which can become
+  stale after another promotion. Resolve parent pointers and check the node
+  kind; never assume a layer-slot target is a leaf (`RNG-04`, `GC-02`).
 - Root refresh may try-lock the parent leaf only when no sublayer lock is held.
   Recheck active-slot membership, ikey, layer tag, and the old pointer before
   publishing the resolved root with the parent version marked dirty.
-- Sublayer nodes are retired as a whole after their owning slot is cleared.
-  A retired cached root makes traversal request a fresh descent; readers and
+- Sublayer nodes are retired as a whole after their owning slot is cleared. A
+  retired cached root makes traversal request a fresh descent; readers and
   writers must reset the key's layer offset and restart from the main root.
 
 ### B-link chain and retirement
@@ -267,7 +270,8 @@ These are not suggestions; breaking them causes data loss, UAF, or hangs.
 
 ## 8. Known audit landmines
 
-Before touching these areas, read the corresponding `notes/SystemAudit.md` finding:
+Before touching these areas, read the corresponding `notes/SystemAudit.md`
+finding:
 
 | Area | Finding |
 |---|---|
@@ -311,8 +315,8 @@ A change is ready only when:
 - [ ] No new safe-API unsoundness, `unsafe` block without a proof, or debug-only
       precondition is introduced.
 - [ ] Public API/docs/semver impact is noted.
-- [ ] `notes/SystemAudit.md` and/or `failures/README.md` are updated if the audit
-      status changes.
+- [ ] `notes/SystemAudit.md` and/or `failures/README.md` are updated if the
+      audit status changes.
 
 ## 10. Useful commands
 
