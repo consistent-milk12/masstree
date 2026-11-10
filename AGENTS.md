@@ -62,15 +62,16 @@ cargo check --features no-prefetch
 cargo check --tests
 ```
 
-Known baseline failures (do not treat as a reason to ignore the whole command):
+These gates must pass; CI (`.github/workflows/ci.yml`) runs them:
 
 ```bash
-cargo check --all-targets --no-default-features   # fails on examples/print_tree.rs
-cargo clippy --all-targets --all-features -- -D warnings  # currently 4 errors
+cargo check --all-targets --no-default-features
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-These are tracked in `notes/SystemAudit.md` as `TOOL-01` and `TOOL-04`. Fixing
-them is welcome, but do not mix unrelated lint cleanup into a correctness fix.
+Both used to fail (`TOOL-01` and `TOOL-04` in `notes/SystemAudit.md`) and are
+now fixed, so a new failure in either is a regression. Do not mix unrelated lint
+cleanup into a correctness fix.
 
 Loom:
 
